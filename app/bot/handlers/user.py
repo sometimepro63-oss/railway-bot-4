@@ -5,12 +5,15 @@ from datetime import timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.keyboards.payment import payment_keyboard
 from app.bot.keyboards.start_inline import start_inline_keyboard
 from app.config import Settings
 from app.db.models import Payment, PaymentStatus, SubscriptionStatus, User
@@ -20,6 +23,9 @@ from app.services.subscriptions import get_subscription, utcnow
 
 log = logging.getLogger(__name__)
 router = Router()
+
+class EmailPaymentState(StatesGroup):
+    waiting_for_email = State()
 
 START_TEXT = """Присоединяйся к моему закрытому каналу с готовыми рационами питания 🥗✨
 
@@ -66,21 +72,69 @@ async def _upsert_user(session: AsyncSession, message: Message) -> None:
 
 
 @router.message(Command("start"))
-async def start_cmd(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
+async def start_cmd(message: Message, session: AsyncSession, settings: Settings) -> None:
     await _upsert_user(session, message)
+    tmp = await message.answer(".", reply_markup=ReplyKeyboardRemove())
+    try:
+        await tmp.delete()
+    except Exception:
+        pass
+    await message.answer(
+        START_TEXT,
+        reply_markup=start_inline_keyboard(),
+        disable_web_page_preview=True,
+    )
+
+
+def _normalize_email(raw: str) -> str:
+    return raw.strip().lower()
+
+
+def _is_valid_email(email: str) -> bool:
+    if "@" not in email:
+        return False
+    local, _, domain = email.partition("@")
+    if not local or not domain:
+        return False
+    if "." not in domain:
+        return False
+    if domain.startswith(".") or domain.endswith("."):
+        return False
+    return True
+
+
+@router.callback_query(F.data == "start_payment_email")
+async def start_payment_email(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await state.set_state(EmailPaymentState.waiting_for_email)
+    await cb.message.answer("Введите email, который укажете при оплате:")
+
+
+@router.message(EmailPaymentState.waiting_for_email)
+async def email_entered(message: Message, bot: Bot, session: AsyncSession, settings: Settings, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    email = _normalize_email(raw)
+    if not _is_valid_email(email):
+        await message.answer("Неверный email. Введите email ещё раз:")
+        return
+
+    await state.clear()
+
     if not message.from_user:
         return
     telegram_id = message.from_user.id
-    short_url = await _create_payment(telegram_id, bot, session, settings)
+    short_url = await _create_payment(telegram_id, email, bot, session, settings)
     await message.answer(
-        START_TEXT,
-        reply_markup=start_inline_keyboard(short_url),
+        "Спасибо! Нажмите кнопку ниже для оплаты 👇\n\n"
+        "Важно: при оплате укажите этот же email:\n"
+        f"{email}",
+        reply_markup=payment_keyboard(short_url),
         disable_web_page_preview=True,
     )
-    log.info("payment_link_sent telegram_id=%s order_id=%s", telegram_id, short_url.rsplit("/", 1)[-1])
+    log.info("payment_link_sent telegram_id=%s buyer_email=%s order_id=%s", telegram_id, email, short_url.rsplit("/", 1)[-1])
 
 
-async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, settings: Settings) -> str:
+async def _create_payment(telegram_id: int, buyer_email: str, bot: Bot, session: AsyncSession, settings: Settings) -> str:
     await session.execute(
         update(Payment)
         .where(
@@ -94,6 +148,7 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
     payment = Payment(
         telegram_id=telegram_id,
         order_id=order_id,
+        buyer_email=buyer_email,
         amount=settings.product_price,
         currency="rub",
         status=PaymentStatus.pending,
@@ -104,11 +159,7 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
 
     me = await bot.get_me()
     back_url = f"https://t.me/{me.username}" if me.username else "https://t.me"
-    notification_url = (
-        f"{settings.webhook_base_url}/webhooks/prodamus"
-        f"?internal_order_id={order_id}&telegram_id={telegram_id}"
-    )
-    customer_email = f"order_{order_id}@bot.local"
+    notification_url = f"{settings.webhook_base_url}/webhooks/prodamus"
 
     data = {
         "do": "pay",
@@ -128,7 +179,7 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
         "urlNotification": notification_url,
         "customer_extra": order_id,
         "customer_extra_telegram_id": str(telegram_id),
-        "customer_email": customer_email,
+        "customer_email": buyer_email,
     }
 
     url = build_payment_url(settings.prodamus_payment_page_url, settings.prodamus_secret_key, data)
@@ -146,9 +197,10 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
     has_order_num = "order_num" in query_keys
     has_customer_extra = "customer_extra" in query_keys
     log.info(
-        "payment_created base_orderId=%s internal_order_id=%s has_order_num=%s has_customer_extra=%s base_payment_page_url=%s query_keys=%s payment_url=%s",
+        "payment_created base_orderId=%s internal_order_id=%s buyer_email=%s has_order_num=%s has_customer_extra=%s base_payment_page_url=%s query_keys=%s payment_url=%s",
         base_order_id,
         order_id,
+        buyer_email,
         has_order_num,
         has_customer_extra,
         settings.prodamus_payment_page_url,
@@ -159,17 +211,18 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
 
 
 @router.message(Command("buy"))
-async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
+async def buy_cmd(message: Message, session: AsyncSession, settings: Settings) -> None:
     await _upsert_user(session, message)
-    if not message.from_user:
-        return
-    short_url = await _create_payment(message.from_user.id, bot, session, settings)
+    tmp = await message.answer(".", reply_markup=ReplyKeyboardRemove())
+    try:
+        await tmp.delete()
+    except Exception:
+        pass
     await message.answer(
         START_TEXT,
-        reply_markup=start_inline_keyboard(short_url),
+        reply_markup=start_inline_keyboard(),
         disable_web_page_preview=True,
     )
-    log.info("payment_link_sent telegram_id=%s order_id=%s", message.from_user.id, short_url.rsplit("/", 1)[-1])
 
 
 @router.message(Command("profile"))

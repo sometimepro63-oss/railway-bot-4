@@ -145,7 +145,7 @@ async def prodamus_webhook(request: Request) -> dict:
     )
     internal_order_id_guess = payload_order_num or payload_customer_extra or payload_order_id
 
-    log.info(
+    log.debug(
         "prodamus_webhook_products_debug products_type=%s products_preview=%s",
         products_type,
         products_preview,
@@ -194,6 +194,7 @@ async def prodamus_webhook(request: Request) -> dict:
         )
         return {"ok": True}
 
+    normalized_customer_email = payload_customer_email.strip().lower()
     webhook = extract_webhook(payload)
     internal_order_id = (
         query_internal_order_id
@@ -210,10 +211,54 @@ async def prodamus_webhook(request: Request) -> dict:
 
     async with sessionmaker() as session:
         async with session.begin():
-            res = await session.execute(
-                select(Payment).where(Payment.order_id == internal_order_id).with_for_update()
-            )
-            payment = res.scalar_one_or_none()
+            payment = None
+            if normalized_customer_email:
+                payment = (
+                    await session.execute(
+                        select(Payment)
+                        .where(
+                            Payment.buyer_email == normalized_customer_email,
+                            Payment.status.in_([PaymentStatus.created, PaymentStatus.pending]),
+                        )
+                        .order_by(Payment.created_at.desc())
+                        .limit(1)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+
+                if payment is None:
+                    payment = (
+                        await session.execute(
+                            select(Payment)
+                            .where(Payment.buyer_email == normalized_customer_email)
+                            .order_by(Payment.created_at.desc())
+                            .limit(1)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+
+                if payment is None:
+                    recent = (
+                        await session.execute(
+                            select(Payment.buyer_email, Payment.order_id)
+                            .where(Payment.status.in_([PaymentStatus.created, PaymentStatus.pending]))
+                            .order_by(Payment.created_at.desc())
+                            .limit(5)
+                        )
+                    ).all()
+                    recent_pairs = [f"{(r[0] or '')}:{r[1]}" for r in recent]
+                    log.warning(
+                        "prodamus_payment_not_found_by_email customer_email=%s recent_unpaid=%s",
+                        normalized_customer_email,
+                        ",".join(recent_pairs),
+                    )
+
+            if payment is None:
+                payment = (
+                    await session.execute(
+                        select(Payment).where(Payment.order_id == internal_order_id).with_for_update()
+                    )
+                ).scalar_one_or_none()
             if payment is None:
                 recent = (
                     await session.execute(
@@ -234,6 +279,7 @@ async def prodamus_webhook(request: Request) -> dict:
                 )
                 raise HTTPException(status_code=400, detail="unknown order_id")
             payment_found = True
+            internal_order_id = payment.order_id
 
             payment.raw_payload = webhook.raw
             if webhook.prodamus_payment_id:

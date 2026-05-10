@@ -49,6 +49,7 @@ class Payment(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
     order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    buyer_email: Mapped[str | None] = mapped_column(String(320), index=True)
     prodamus_payment_id: Mapped[str | None] = mapped_column(String(64))
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     currency: Mapped[str] = mapped_column(String(8), nullable=False, server_default="rub")

@@ -5,6 +5,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.handlers.admin import router as admin_router
@@ -28,7 +29,7 @@ def create_dispatcher(
     settings: Settings,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> Dispatcher:
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
     dp.update.middleware(SettingsMiddleware(settings))
     dp.update.middleware(DBSessionMiddleware(sessionmaker))
