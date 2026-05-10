@@ -6,14 +6,14 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 
 def _to_str(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
-        return "1" if value else "0"
+        return "1" if value else ""
     return str(value)
 
 
@@ -28,7 +28,7 @@ def _normalize(value: Any) -> Any:
 def _json_for_sign(data: Mapping[str, Any]) -> str:
     normalized = _normalize(data)
     raw = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
-    return raw.replace("/", "\\/")
+    return raw
 
 
 def create_signature(data: Mapping[str, Any], secret_key: str) -> str:
@@ -120,13 +120,15 @@ def _flatten(prefix: str, value: Any, out: list[tuple[str, str]]) -> None:
 
 
 def build_payment_url(payment_page_url: str, secret_key: str, data: dict[str, Any]) -> str:
+    split = urlsplit(payment_page_url)
+    base = urlunsplit((split.scheme, split.netloc, split.path, "", ""))
     signature = create_signature(data, secret_key)
     signed = dict(data)
     signed["signature"] = signature
     pairs: list[tuple[str, str]] = []
     _flatten("", signed, pairs)
     query = urlencode(pairs, doseq=True)
-    return f"{payment_page_url}?{query}"
+    return f"{base}?{query}"
 
 
 @dataclass(frozen=True, slots=True)

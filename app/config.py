@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -30,6 +31,15 @@ def _normalize_db_url(url: str) -> str:
     if url.startswith("postgresql://"):
         url = "postgresql+asyncpg://" + url[len("postgresql://") :]
     return url
+
+
+def _sanitize_payment_page_url(url: str) -> str:
+    raw = url.strip()
+    split = urlsplit(raw)
+    if not split.scheme or not split.netloc:
+        raise RuntimeError("PRODAMUS_PAYMENT_PAGE_URL is invalid")
+    base = urlunsplit((split.scheme, split.netloc, split.path or "/", "", ""))
+    return base
 
 
 def _get_database_url() -> str:
@@ -79,7 +89,7 @@ def load_settings() -> Settings:
 
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     prodamus_secret_key = os.getenv("PRODAMUS_SECRET_KEY", "").strip()
-    prodamus_payment_page_url = os.getenv("PRODAMUS_PAYMENT_PAGE_URL", "").strip().rstrip("/") + "/"
+    prodamus_payment_page_url = _sanitize_payment_page_url(os.getenv("PRODAMUS_PAYMENT_PAGE_URL", ""))
     webhook_base_url = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
 
     group_id_raw = os.getenv("GROUP_ID", "").strip()

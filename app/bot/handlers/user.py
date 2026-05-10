@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.payment import payment_keyboard
@@ -63,21 +64,12 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
     await _upsert_user(session, message)
 
     await session.execute(
-        select(Payment)
+        update(Payment)
         .where(
             Payment.telegram_id == message.from_user.id,
             Payment.status.in_([PaymentStatus.created, PaymentStatus.pending]),
         )
-        .with_for_update()
-    )
-    await session.execute(
-        Payment.__table__
-        .update()
-        .where(
-            Payment.telegram_id == message.from_user.id,
-            Payment.status.in_([PaymentStatus.created.value, PaymentStatus.pending.value]),
-        )
-        .values(status=PaymentStatus.cancelled.value)
+        .values(status=PaymentStatus.cancelled)
     )
 
     order_id = uuid4().hex
@@ -112,15 +104,25 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
         "urlNotification": f"{settings.webhook_base_url}/webhooks/prodamus",
         "customer_extra": str(message.from_user.id),
     }
-    if settings.payment_link_ttl_minutes > 0:
-        link_expired = (utcnow() + timedelta(minutes=settings.payment_link_ttl_minutes)).strftime("%Y-%m-%d %H:%M")
-        data["link_expired"] = link_expired
 
     url = build_payment_url(settings.prodamus_payment_page_url, settings.prodamus_secret_key, data)
     payment.payment_url = url
     await session.flush()
 
     short_url = f"{settings.webhook_base_url}/pay/{order_id}"
+
+    split = urlsplit(url)
+    qs = parse_qsl(split.query, keep_blank_values=True)
+    masked_qs = [(k, "***" if k == "signature" else v) for k, v in qs]
+    masked_url = urlunsplit((split.scheme, split.netloc, split.path, urlencode(masked_qs), split.fragment))
+    query_keys = sorted({k for k, _ in qs})
+    log.info(
+        "payment_created order_id=%s base_payment_page_url=%s query_keys=%s payment_url=%s",
+        order_id,
+        settings.prodamus_payment_page_url,
+        ",".join(query_keys),
+        masked_url,
+    )
 
     await message.answer(
         "Для оплаты доступа нажмите кнопку ниже 👇\n\n"
