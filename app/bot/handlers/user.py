@@ -95,11 +95,15 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
     }
 
     url = build_payment_url(settings.prodamus_payment_page_url, settings.prodamus_secret_key, data)
+    payment.payment_url = url
+    await session.flush()
+
+    short_url = f"{settings.webhook_base_url}/pay/{order_id}"
 
     await message.answer(
         "Для оплаты доступа нажмите кнопку ниже 👇\n\n"
         "После успешной оплаты бот автоматически отправит ссылку для входа.",
-        reply_markup=payment_keyboard(url),
+        reply_markup=payment_keyboard(short_url),
     )
     log.info("payment_link_sent telegram_id=%s order_id=%s", message.from_user.id, order_id)
 

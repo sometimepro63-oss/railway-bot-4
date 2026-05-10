@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.routes.health import router as health_router
+from app.api.routes.pay import router as pay_router
 from app.api.routes.webhooks import router as webhooks_router
 from app.config import Settings, load_settings
 from app.db.models import Subscription, SubscriptionStatus
@@ -27,6 +28,7 @@ setup_logging(settings.log_level)
 
 app = FastAPI()
 app.include_router(health_router)
+app.include_router(pay_router)
 app.include_router(webhooks_router)
 
 

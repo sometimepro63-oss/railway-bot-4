@@ -57,6 +57,7 @@ class Payment(Base):
         nullable=False,
         server_default=PaymentStatus.created.value,
     )
+    payment_url: Mapped[str | None] = mapped_column(Text)
     raw_payload: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
