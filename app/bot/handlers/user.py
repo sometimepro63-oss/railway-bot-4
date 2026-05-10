@@ -108,6 +108,7 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
         f"{settings.webhook_base_url}/webhooks/prodamus"
         f"?internal_order_id={order_id}&telegram_id={telegram_id}"
     )
+    customer_email = f"order_{order_id}@bot.local"
 
     data = {
         "do": "pay",
@@ -127,6 +128,7 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
         "urlNotification": notification_url,
         "customer_extra": order_id,
         "customer_extra_telegram_id": str(telegram_id),
+        "customer_email": customer_email,
     }
 
     url = build_payment_url(settings.prodamus_payment_page_url, settings.prodamus_secret_key, data)

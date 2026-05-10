@@ -39,6 +39,17 @@ def _detect_paid(payload: dict) -> tuple[bool | None, str]:
     return (None, "")
 
 
+def _extract_internal_order_id_from_email(value: object) -> str:
+    email = _to_str(value).strip().lower()
+    if not email:
+        return ""
+    prefix = "order_"
+    suffix = "@bot.local"
+    if email.startswith(prefix) and email.endswith(suffix) and len(email) > len(prefix) + len(suffix):
+        return email[len(prefix) : -len(suffix)]
+    return ""
+
+
 async def _read_payload(request: Request) -> dict:
     body = await request.body()
     content_type = (request.headers.get("content-type") or "").lower()
@@ -104,6 +115,8 @@ async def prodamus_webhook(request: Request) -> dict:
     payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
     payload_order_num = _to_str(payload.get("order_num") if isinstance(payload, dict) else None)
     payload_customer_extra = _to_str(payload.get("customer_extra") if isinstance(payload, dict) else None)
+    payload_customer_email = _to_str(payload.get("customer_email") if isinstance(payload, dict) else None)
+    internal_order_id_from_email = _extract_internal_order_id_from_email(payload_customer_email)
     paid_detected, detected_status = _detect_paid(payload if isinstance(payload, dict) else {})
     payload_order_id = _to_str(
         payload.get("order_id") or payload.get("orderid") or payload.get("order") if isinstance(payload, dict) else None
@@ -111,12 +124,16 @@ async def prodamus_webhook(request: Request) -> dict:
     internal_order_id_guess = payload_order_num or payload_customer_extra or payload_order_id
 
     log.info(
-        "prodamus_webhook_received method=%s payload_keys=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s internal_order_id_guess=%s detected_status=%s paid=%s sign_present=%s",
+        "prodamus_webhook_received method=%s payload_keys=%s query_internal_order_id=%s query_telegram_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s payload_customer_email=%s internal_order_id_from_email=%s internal_order_id_guess=%s detected_status=%s paid=%s sign_present=%s",
         request.method,
         ",".join(payload_keys),
+        query_internal_order_id,
+        query_telegram_id,
         payload_order_id,
         payload_order_num,
         payload_customer_extra,
+        payload_customer_email,
+        internal_order_id_from_email,
         internal_order_id_guess,
         detected_status,
         paid_detected,
@@ -137,11 +154,13 @@ async def prodamus_webhook(request: Request) -> dict:
 
     if paid_detected is not True:
         log.info(
-            "prodamus_webhook_not_paid query_internal_order_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s detected_status=%s paid=%s",
+            "prodamus_webhook_not_paid query_internal_order_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s payload_customer_email=%s internal_order_id_from_email=%s detected_status=%s paid=%s",
             query_internal_order_id,
             payload_order_id,
             payload_order_num,
             payload_customer_extra,
+            payload_customer_email,
+            internal_order_id_from_email,
             detected_status,
             paid_detected,
         )
@@ -150,6 +169,7 @@ async def prodamus_webhook(request: Request) -> dict:
     webhook = extract_webhook(payload)
     internal_order_id = (
         query_internal_order_id
+        or internal_order_id_from_email
         or payload_order_num
         or payload_customer_extra
         or webhook.order_id
@@ -173,10 +193,14 @@ async def prodamus_webhook(request: Request) -> dict:
                     )
                 ).scalars().all()
                 log.warning(
-                    "prodamus_payment_not_found payload_order_id=%s payload_order_num=%s payload_customer_extra=%s internal_order_id=%s recent_order_ids=%s",
+                    "prodamus_payment_not_found query_internal_order_id=%s query_telegram_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s payload_customer_email=%s internal_order_id_from_email=%s internal_order_id=%s recent_order_ids=%s",
+                    query_internal_order_id,
+                    query_telegram_id,
                     payload_order_id,
                     payload_order_num,
                     payload_customer_extra,
+                    payload_customer_email,
+                    internal_order_id_from_email,
                     internal_order_id,
                     ",".join(recent),
                 )
