@@ -116,7 +116,7 @@ def load_settings() -> Settings:
     product_price = int(os.getenv("PRODUCT_PRICE", "990").strip())
     lifetime_access = _parse_bool(os.getenv("LIFETIME_ACCESS"))
     access_days = None if lifetime_access else int(os.getenv("ACCESS_DAYS", "30").strip())
-    invite_link_expire_minutes = int(os.getenv("INVITE_LINK_EXPIRE_MINUTES", "20").strip())
+    invite_link_expire_minutes = int(os.getenv("INVITE_LINK_EXPIRE_MINUTES", "3").strip())
     payment_link_ttl_minutes = int(os.getenv("PAYMENT_LINK_TTL_MINUTES", "30").strip())
 
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
