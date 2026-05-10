@@ -7,12 +7,12 @@ from uuid import uuid4
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.keyboards.payment import payment_keyboard
-from app.bot.keyboards.start import start_keyboard
+from app.bot.keyboards.start_inline import start_inline_keyboard
 from app.config import Settings
 from app.db.models import InviteLink, Payment, PaymentStatus, SubscriptionStatus, User
 from app.services.prodamus import build_payment_url
@@ -56,17 +56,28 @@ async def start_cmd(message: Message, session: AsyncSession, settings: Settings)
         f"Срок доступа: {access_str}\n\n"
         "После оплаты бот автоматически выдаст временную ссылку для входа."
     )
-    await message.answer(text, reply_markup=start_keyboard())
+    tmp = await message.answer(".", reply_markup=ReplyKeyboardRemove())
+    try:
+        await tmp.delete()
+    except Exception:
+        pass
+    await message.answer(text, reply_markup=start_inline_keyboard())
 
 
-@router.message(Command("buy"))
-async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
-    await _upsert_user(session, message)
+@router.callback_query(F.data == "buy")
+async def buy_inline(cb: CallbackQuery, bot: Bot, session: AsyncSession, settings: Settings) -> None:
+    if not cb.from_user:
+        await cb.answer()
+        return
+    await cb.answer()
+    await _buy_flow(cb.from_user.id, bot, session, settings)
 
+
+async def _buy_flow(telegram_id: int, bot: Bot, session: AsyncSession, settings: Settings) -> None:
     await session.execute(
         update(Payment)
         .where(
-            Payment.telegram_id == message.from_user.id,
+            Payment.telegram_id == telegram_id,
             Payment.status.in_([PaymentStatus.created, PaymentStatus.pending]),
         )
         .values(status=PaymentStatus.cancelled)
@@ -74,7 +85,7 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
 
     order_id = uuid4().hex
     payment = Payment(
-        telegram_id=message.from_user.id,
+        telegram_id=telegram_id,
         order_id=order_id,
         amount=settings.product_price,
         currency="rub",
@@ -102,7 +113,7 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
         "urlSuccess": back_url,
         "urlReturn": back_url,
         "urlNotification": f"{settings.webhook_base_url}/webhooks/prodamus",
-        "customer_extra": str(message.from_user.id),
+        "customer_extra": str(telegram_id),
     }
 
     url = build_payment_url(settings.prodamus_payment_page_url, settings.prodamus_secret_key, data)
@@ -126,18 +137,20 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
         masked_url,
     )
 
-    await message.answer(
+    await bot.send_message(
+        telegram_id,
         "Для оплаты доступа нажмите кнопку ниже 👇\n\n"
         "После успешной оплаты бот автоматически отправит ссылку для входа.\n\n"
         "Ссылка на оплату действует ограниченное время. Если она устарела, нажмите ‘Купить доступ’ заново.",
         reply_markup=payment_keyboard(short_url),
     )
-    log.info("payment_link_sent telegram_id=%s order_id=%s", message.from_user.id, order_id)
+    log.info("payment_link_sent telegram_id=%s order_id=%s", telegram_id, order_id)
 
 
-@router.message(F.text == "Купить доступ")
-async def buy_btn(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
-    await buy_cmd(message, bot, session, settings)
+@router.message(Command("buy"))
+async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
+    await _upsert_user(session, message)
+    await _buy_flow(message.from_user.id, bot, session, settings)
 
 
 @router.message(Command("profile"))
@@ -151,7 +164,7 @@ async def profile_cmd(message: Message, session: AsyncSession, settings: Setting
             "У вас пока нет активного доступа.\n\n"
             "Нажмите “Купить доступ”, чтобы оплатить вход в группу."
         )
-        await message.answer(text, reply_markup=start_keyboard())
+        await message.answer(text)
         return
 
     if sub.expires_at is None:
@@ -164,30 +177,16 @@ async def profile_cmd(message: Message, session: AsyncSession, settings: Setting
             "У вас пока нет активного доступа.\n\n"
             "Нажмите “Купить доступ”, чтобы оплатить вход в группу."
         )
-        await message.answer(text, reply_markup=start_keyboard())
+        await message.answer(text)
         return
 
     expires = sub.expires_at.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M")
     await message.answer(f"Ваш статус: активен\nДоступ до: {expires}")
 
 
-@router.message(F.text == "Мой доступ")
-async def profile_btn(message: Message, session: AsyncSession, settings: Settings) -> None:
-    await profile_cmd(message, session, settings)
-
-
 @router.message(Command("help"))
 async def help_cmd(message: Message) -> None:
-    await message.answer(
-        "/buy — купить доступ\n"
-        "/profile — проверить доступ\n"
-        "/help — помощь"
-    )
-
-
-@router.message(F.text == "Помощь")
-async def help_btn(message: Message) -> None:
-    await help_cmd(message)
+    await message.answer("Нажмите «Оплатить» в /start или используйте /buy для создания оплаты.")
 
 
 async def _get_existing_invite(session: AsyncSession, telegram_id: int) -> InviteLink | None:
