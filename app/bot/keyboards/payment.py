@@ -7,7 +7,6 @@ def payment_keyboard(payment_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Оплатить доступ", url=payment_url)],
-            [InlineKeyboardButton(text="Я оплатил", callback_data="check_payment")],
         ]
     )
 

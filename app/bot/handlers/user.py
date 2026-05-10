@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta, timezone
+from datetime import timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -14,10 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bot.keyboards.payment import payment_keyboard
 from app.bot.keyboards.start_inline import start_inline_keyboard
 from app.config import Settings
-from app.db.models import InviteLink, Payment, PaymentStatus, SubscriptionStatus, User
+from app.db.models import Payment, PaymentStatus, SubscriptionStatus, User
 from app.services.prodamus import build_payment_url
 from app.services.subscriptions import get_subscription, utcnow
-from app.services.telegram_access import create_one_time_invite, is_member
 
 
 log = logging.getLogger(__name__)
@@ -153,7 +152,7 @@ async def _buy_flow(telegram_id: int, bot: Bot, session: AsyncSession, settings:
         telegram_id,
         "Для оплаты доступа нажмите кнопку ниже 👇\n\n"
         "После успешной оплаты бот автоматически отправит ссылку для входа.\n\n"
-        "Ссылка на оплату действует ограниченное время. Если она устарела, нажмите ‘Купить доступ’ заново.",
+        "Ссылка на оплату действует ограниченное время. Если она устарела, нажмите «Оплатить» заново.",
         reply_markup=payment_keyboard(short_url),
     )
     log.info("payment_link_sent telegram_id=%s order_id=%s", telegram_id, order_id)
@@ -199,94 +198,4 @@ async def profile_cmd(message: Message, session: AsyncSession, settings: Setting
 @router.message(Command("help"))
 async def help_cmd(message: Message) -> None:
     await message.answer("Нажмите «Оплатить» в /start или используйте /buy для создания оплаты.")
-
-
-async def _get_existing_invite(session: AsyncSession, telegram_id: int) -> InviteLink | None:
-    now = utcnow()
-    res = await session.execute(
-        select(InviteLink)
-        .where(
-            InviteLink.telegram_id == telegram_id,
-            InviteLink.used.is_(False),
-            InviteLink.expire_at > now,
-        )
-        .order_by(InviteLink.created_at.desc())
-        .limit(1)
-    )
-    return res.scalar_one_or_none()
-
-
-@router.callback_query(F.data == "check_payment")
-async def check_payment(cb: CallbackQuery, bot: Bot, session: AsyncSession, settings: Settings) -> None:
-    if not cb.from_user:
-        await cb.answer()
-        return
-
-    telegram_id = cb.from_user.id
-    await cb.answer()
-
-    now = utcnow()
-    sub = await get_subscription(session, telegram_id)
-    active = (
-        sub is not None
-        and sub.status == SubscriptionStatus.active
-        and (sub.expires_at is None or sub.expires_at > now)
-    )
-
-    if not active:
-        paid = (
-            await session.execute(
-                select(Payment)
-                .where(Payment.telegram_id == telegram_id, Payment.status == PaymentStatus.paid)
-                .order_by(desc(Payment.paid_at))
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if paid is None:
-            await cb.message.answer(
-                "Платёж пока не найден. Обычно подтверждение приходит в течение 1–2 минут. "
-                "Если вы только что оплатили, попробуйте ещё раз чуть позже."
-            )
-            return
-        await cb.message.answer(
-            "Оплата подтверждена, но доступ ещё активируется. "
-            "Обычно это занимает до 1–2 минут. Попробуйте ещё раз чуть позже."
-        )
-        return
-
-    try:
-        in_group = await is_member(bot, settings.group_id, telegram_id)
-    except Exception:
-        log.exception("tg_membership_check_failed telegram_id=%s", telegram_id)
-        in_group = False
-
-    if in_group:
-        if sub and sub.expires_at is None:
-            await cb.message.answer("Ваш доступ уже активен.\n\nВаш доступ: навсегда")
-        else:
-            await cb.message.answer("Ваш доступ уже активен.")
-        return
-
-    existing = await _get_existing_invite(session, telegram_id)
-    invite_url = existing.invite_link if existing else None
-    if not invite_url:
-        expire_at = now + timedelta(minutes=settings.invite_link_expire_minutes)
-        invite = await create_one_time_invite(bot, settings.group_id, expire_at)
-        invite_url = invite.invite_link
-        session.add(
-            InviteLink(
-                telegram_id=telegram_id,
-                invite_link=invite_url,
-                expire_at=expire_at,
-                used=False,
-            )
-        )
-        await session.flush()
-
-    await cb.message.answer(
-        "Ваша ссылка для входа в закрытую группу:\n"
-        f"{invite_url}\n\n"
-        f"Ссылка действует {settings.invite_link_expire_minutes} минут и только для одного вступления.",
-        disable_web_page_preview=True,
-    )
 
