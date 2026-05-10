@@ -12,8 +12,19 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE TYPE payment_status AS ENUM ('created','pending','paid','failed','cancelled')")
-    op.execute("CREATE TYPE subscription_status AS ENUM ('active','expired','cancelled')")
+    bind = op.get_bind()
+
+    payment_status = postgresql.ENUM(
+        "created", "pending", "paid", "failed", "cancelled",
+        name="payment_status",
+    )
+    subscription_status = postgresql.ENUM(
+        "active", "expired", "cancelled",
+        name="subscription_status",
+    )
+
+    payment_status.create(bind, checkfirst=True)
+    subscription_status.create(bind, checkfirst=True)
 
     op.create_table(
         "users",
@@ -38,7 +49,11 @@ def upgrade() -> None:
         sa.Column("currency", sa.String(length=8), server_default="rub", nullable=False),
         sa.Column(
             "status",
-            sa.Enum(name="payment_status"),
+            postgresql.ENUM(
+                "created", "pending", "paid", "failed", "cancelled",
+                name="payment_status",
+                create_type=False,
+            ),
             server_default="created",
             nullable=False,
         ),
@@ -64,7 +79,11 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
             "status",
-            sa.Enum(name="subscription_status"),
+            postgresql.ENUM(
+                "active", "expired", "cancelled",
+                name="subscription_status",
+                create_type=False,
+            ),
             server_default="active",
             nullable=False,
         ),
@@ -87,6 +106,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+
     op.drop_index("ix_invite_links_telegram_id", table_name="invite_links")
     op.drop_table("invite_links")
 
@@ -101,6 +122,6 @@ def downgrade() -> None:
     op.drop_index("ix_users_telegram_id", table_name="users")
     op.drop_table("users")
 
-    op.execute("DROP TYPE subscription_status")
-    op.execute("DROP TYPE payment_status")
+    postgresql.ENUM(name="subscription_status").drop(bind, checkfirst=True)
+    postgresql.ENUM(name="payment_status").drop(bind, checkfirst=True)
 
