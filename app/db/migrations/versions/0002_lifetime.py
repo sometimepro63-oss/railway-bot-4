@@ -4,7 +4,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0002_subscription_expires_nullable"
+revision = "0002_lifetime"
 down_revision = "0001_init"
 branch_labels = None
 depends_on = None
