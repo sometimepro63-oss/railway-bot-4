@@ -68,7 +68,7 @@ class Subscription(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True, nullable=False)
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[SubscriptionStatus] = mapped_column(
         Enum(SubscriptionStatus, name="subscription_status"),
         nullable=False,

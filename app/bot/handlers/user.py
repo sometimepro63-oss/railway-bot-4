@@ -46,10 +46,11 @@ async def _upsert_user(session: AsyncSession, message: Message) -> None:
 @router.message(Command("start"))
 async def start_cmd(message: Message, session: AsyncSession, settings: Settings) -> None:
     await _upsert_user(session, message)
+    access_str = "навсегда" if settings.lifetime_access else f"{settings.access_days} дней"
     text = (
         "Привет! Здесь можно оплатить доступ в закрытую группу.\n\n"
         f"Стоимость: {settings.product_price} ₽\n"
-        f"Срок доступа: {settings.access_days} дней\n\n"
+        f"Срок доступа: {access_str}\n\n"
         "После оплаты бот автоматически выдаст временную ссылку для входа."
     )
     await message.answer(text, reply_markup=start_keyboard())
@@ -107,7 +108,20 @@ async def profile_cmd(message: Message, session: AsyncSession, settings: Setting
     await _upsert_user(session, message)
     sub = await get_subscription(session, message.from_user.id)
     now = utcnow()
-    if sub is None or sub.status != SubscriptionStatus.active or sub.expires_at <= now:
+    if sub is None or sub.status != SubscriptionStatus.active:
+        text = (
+            "Ваш статус: неактивен\n\n"
+            "У вас пока нет активного доступа.\n\n"
+            "Нажмите “Купить доступ”, чтобы оплатить вход в группу."
+        )
+        await message.answer(text, reply_markup=start_keyboard())
+        return
+
+    if sub.expires_at is None:
+        await message.answer("Ваш доступ: навсегда")
+        return
+
+    if sub.expires_at <= now:
         text = (
             "Ваш статус: неактивен\n\n"
             "У вас пока нет активного доступа.\n\n"

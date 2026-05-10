@@ -80,6 +80,7 @@ async def prodamus_webhook(request: Request) -> dict:
     payment_telegram_id: int | None = None
     expires_at_str: str | None = None
     already_paid = False
+    is_lifetime = False
 
     async with sessionmaker() as session:
         async with session.begin():
@@ -119,12 +120,19 @@ async def prodamus_webhook(request: Request) -> dict:
             else:
                 payment.status = PaymentStatus.paid
                 payment.paid_at = utcnow()
-                sub = await ensure_subscription_paid(session, payment.telegram_id, settings.access_days)
-                expires_at_str = sub.expires_at.strftime("%d.%m.%Y %H:%M")
+                sub = await ensure_subscription_paid(
+                    session,
+                    payment.telegram_id,
+                    settings.access_days,
+                    settings.lifetime_access,
+                )
+                is_lifetime = sub.expires_at is None
+                expires_at_str = sub.expires_at.strftime("%d.%m.%Y %H:%M") if sub.expires_at else None
             if already_paid:
                 sub = await get_subscription(session, payment.telegram_id)
                 if sub is not None:
-                    expires_at_str = sub.expires_at.strftime("%d.%m.%Y %H:%M")
+                    is_lifetime = sub.expires_at is None
+                    expires_at_str = sub.expires_at.strftime("%d.%m.%Y %H:%M") if sub.expires_at else None
 
     if payment_telegram_id is None:
         raise HTTPException(status_code=500, detail="internal error")
@@ -138,10 +146,13 @@ async def prodamus_webhook(request: Request) -> dict:
     if in_group:
         if not already_paid:
             try:
-                await bot.send_message(
-                    payment_telegram_id,
-                    f"Оплата прошла успешно ✅\n\nВаш доступ активен до: {expires_at_str}",
-                )
+                if is_lifetime:
+                    await bot.send_message(payment_telegram_id, "Оплата прошла успешно ✅\n\nДоступ открыт навсегда.")
+                else:
+                    await bot.send_message(
+                        payment_telegram_id,
+                        f"Оплата прошла успешно ✅\n\nВаш доступ активен до: {expires_at_str}",
+                    )
             except Exception:
                 log.exception("tg_send_extend_failed telegram_id=%s", payment_telegram_id)
         return {"ok": True}
@@ -172,14 +183,24 @@ async def prodamus_webhook(request: Request) -> dict:
                 )
 
     try:
-        await bot.send_message(
-            payment_telegram_id,
-            "Оплата прошла успешно ✅\n\n"
-            "Ваша ссылка для входа в закрытую группу:\n"
-            f"{invite_url}\n\n"
-            f"Ссылка действует {settings.invite_link_expire_minutes} минут и только для одного вступления.",
-            disable_web_page_preview=True,
-        )
+        if is_lifetime:
+            await bot.send_message(
+                payment_telegram_id,
+                "Оплата прошла успешно ✅\n\n"
+                "Доступ открыт навсегда.\n\n"
+                "Ваша ссылка для входа:\n"
+                f"{invite_url}",
+                disable_web_page_preview=True,
+            )
+        else:
+            await bot.send_message(
+                payment_telegram_id,
+                "Оплата прошла успешно ✅\n\n"
+                "Ваша ссылка для входа в закрытую группу:\n"
+                f"{invite_url}\n\n"
+                f"Ссылка действует {settings.invite_link_expire_minutes} минут и только для одного вступления.",
+                disable_web_page_preview=True,
+            )
     except Exception:
         log.exception("tg_send_invite_failed telegram_id=%s", payment_telegram_id)
         raise HTTPException(status_code=502, detail="telegram send failed")

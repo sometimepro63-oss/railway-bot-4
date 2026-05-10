@@ -28,6 +28,7 @@ Production-ready бот для продажи доступа в закрытую
 - `GROUP_ID` (id группы, обычно отрицательный)
 - `ADMIN_IDS` (через запятую)
 - `DATABASE_URL`
+- `LIFETIME_ACCESS`
 - `LOG_LEVEL` (опционально)
 
 2) В Prodamus укажите `urlNotification` на `https://<WEBHOOK_BASE_URL>/webhooks/prodamus`.
@@ -87,6 +88,14 @@ uvicorn app.main_api:app --host 0.0.0.0 --port 8000
 Если Railway даёт URL вида `postgresql://...`, код сам преобразует его в `postgresql+asyncpg://...`.
 
 Railway env diagnostics enabled.
+
+## Пожизненный доступ
+
+Если `LIFETIME_ACCESS=true`, то доступ выдаётся навсегда:
+
+- подписка создаётся со статусом `active` и `expires_at = NULL`
+- задача истечения подписок не трогает таких пользователей
+- `ACCESS_DAYS` используется только если `LIFETIME_ACCESS=false`
 
 ## Деплой на Railway
 

@@ -36,11 +36,17 @@ async def _expire_once(
     settings: Settings,
 ) -> None:
     now = utcnow()
+    if settings.lifetime_access:
+        return
     async with sessionmaker() as session:
         rows = (
             await session.execute(
                 select(Subscription)
-                .where(Subscription.status == SubscriptionStatus.active, Subscription.expires_at < now)
+                .where(
+                    Subscription.status == SubscriptionStatus.active,
+                    Subscription.expires_at.is_not(None),
+                    Subscription.expires_at < now,
+                )
                 .limit(500)
             )
         ).scalars().all()
@@ -55,7 +61,11 @@ async def _expire_once(
                         .with_for_update()
                     )
                 ).scalar_one()
-                if locked.status != SubscriptionStatus.active or locked.expires_at >= now:
+                if (
+                    locked.status != SubscriptionStatus.active
+                    or locked.expires_at is None
+                    or locked.expires_at >= now
+                ):
                     continue
                 locked.status = SubscriptionStatus.expired
         try:

@@ -18,6 +18,13 @@ def _parse_int_list(value: str | None) -> list[int]:
     return parts
 
 
+def _parse_bool(value: str | None) -> bool:
+    if value is None:
+        return False
+    v = value.strip().lower()
+    return v in {"1", "true", "yes", "y", "on"}
+
+
 def _normalize_db_url(url: str) -> str:
     url = url.strip()
     if url.startswith("postgresql://"):
@@ -59,7 +66,8 @@ class Settings:
 
     product_name: str
     product_price: int
-    access_days: int
+    lifetime_access: bool
+    access_days: int | None
     invite_link_expire_minutes: int
 
     log_level: str = "INFO"
@@ -80,7 +88,8 @@ def load_settings() -> Settings:
 
     product_name = os.getenv("PRODUCT_NAME", "Доступ в закрытую группу").strip()
     product_price = int(os.getenv("PRODUCT_PRICE", "990").strip())
-    access_days = int(os.getenv("ACCESS_DAYS", "30").strip())
+    lifetime_access = _parse_bool(os.getenv("LIFETIME_ACCESS"))
+    access_days = None if lifetime_access else int(os.getenv("ACCESS_DAYS", "30").strip())
     invite_link_expire_minutes = int(os.getenv("INVITE_LINK_EXPIRE_MINUTES", "20").strip())
 
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
@@ -105,6 +114,7 @@ def load_settings() -> Settings:
         database_url=database_url,
         product_name=product_name,
         product_price=product_price,
+        lifetime_access=lifetime_access,
         access_days=access_days,
         invite_link_expire_minutes=invite_link_expire_minutes,
         log_level=log_level,
