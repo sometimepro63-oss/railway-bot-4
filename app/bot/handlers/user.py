@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,15 +72,11 @@ async def start_cmd(message: Message, bot: Bot, session: AsyncSession, settings:
         return
     telegram_id = message.from_user.id
     short_url = await _create_payment(telegram_id, bot, session, settings)
-    sent = await message.answer(START_TEXT, reply_markup=ReplyKeyboardRemove(), disable_web_page_preview=True)
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=message.chat.id,
-            message_id=sent.message_id,
-            reply_markup=start_inline_keyboard(short_url),
-        )
-    except Exception:
-        log.exception("start_attach_keyboard_failed telegram_id=%s", telegram_id)
+    await message.answer(
+        START_TEXT,
+        reply_markup=start_inline_keyboard(short_url),
+        disable_web_page_preview=True,
+    )
     log.info("payment_link_sent telegram_id=%s order_id=%s", telegram_id, short_url.rsplit("/", 1)[-1])
 
 
@@ -157,8 +153,9 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
         return
     short_url = await _create_payment(message.from_user.id, bot, session, settings)
     await message.answer(
-        "Для оплаты доступа нажмите кнопку ниже 👇",
+        START_TEXT,
         reply_markup=start_inline_keyboard(short_url),
+        disable_web_page_preview=True,
     )
     log.info("payment_link_sent telegram_id=%s order_id=%s", message.from_user.id, short_url.rsplit("/", 1)[-1])
 
