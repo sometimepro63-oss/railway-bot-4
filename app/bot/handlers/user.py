@@ -104,6 +104,10 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
 
     me = await bot.get_me()
     back_url = f"https://t.me/{me.username}" if me.username else "https://t.me"
+    notification_url = (
+        f"{settings.webhook_base_url}/webhooks/prodamus"
+        f"?internal_order_id={order_id}&telegram_id={telegram_id}"
+    )
 
     data = {
         "do": "pay",
@@ -120,7 +124,7 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
         "callbackType": "json",
         "urlSuccess": back_url,
         "urlReturn": back_url,
-        "urlNotification": f"{settings.webhook_base_url}/webhooks/prodamus",
+        "urlNotification": notification_url,
         "customer_extra": order_id,
         "customer_extra_telegram_id": str(telegram_id),
     }
