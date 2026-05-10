@@ -25,7 +25,7 @@ Production-ready бот для продажи доступа в закрытую
 
 - `BOT_TOKEN`
 - `PRODAMUS_SECRET_KEY`
-- `PRODAMUS_PAYMENT_PAGE_URL` (полная ссылка платёжной формы Prodamus; может содержать `paymentLinkId`, например `https://link.payform.ru/?paymentLinkId=...`)
+- `PRODAMUS_PAYMENT_PAGE_URL` (полная рабочая ссылка платёжной формы Prodamus; может содержать `orderId` или `paymentLinkId`, например `https://link.payform.ru/?orderId=...`)
 - `WEBHOOK_BASE_URL` (публичный base url вашего API, например `https://your-app.up.railway.app`)
 - `GROUP_ID` (id группы, обычно отрицательный)
 - `ADMIN_IDS` (через запятую)
@@ -42,7 +42,7 @@ Production-ready бот для продажи доступа в закрытую
 
 Ссылка на оплату действует ограниченное время (переменная `PAYMENT_LINK_TTL_MINUTES`, по умолчанию 30 минут). Если ссылка устарела, нужно нажать “Купить доступ” заново.
 
-Важно: `PRODAMUS_PAYMENT_PAGE_URL` может содержать `paymentLinkId`, но не должен содержать параметры заказа (`orderId`, `order_id`, `products`, `signature` и т.п.). Если они есть, приложение выкинет их из query перед формированием ссылки.
+Важно: `PRODAMUS_PAYMENT_PAGE_URL` может содержать `orderId` (идентификатор платёжной формы) или `paymentLinkId`, но не должен содержать параметры заказа (`order_id`, `products`, `signature` и т.п.). Если они есть, приложение выкинет их из query перед формированием ссылки.
 
 ## Как запустить бота
 

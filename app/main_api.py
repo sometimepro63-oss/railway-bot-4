@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from aiogram import Dispatcher
 from fastapi import FastAPI
@@ -109,6 +110,12 @@ async def on_startup() -> None:
     app.state.sessionmaker = sessionmaker
     app.state.bot = bot
     app.state.dp = dp
+
+    base_order_id = next(
+        (v for k, v in parse_qsl(urlsplit(settings.prodamus_payment_page_url).query, keep_blank_values=True) if k == "orderId"),
+        "",
+    )
+    log.info("prodamus_payment_page_url_orderId=%s", base_order_id)
 
     async def run_polling() -> None:
         await dp.start_polling(bot)

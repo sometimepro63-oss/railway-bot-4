@@ -116,8 +116,10 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
     masked_qs = [(k, "***" if k == "signature" else v) for k, v in qs]
     masked_url = urlunsplit((split.scheme, split.netloc, split.path, urlencode(masked_qs), split.fragment))
     query_keys = sorted({k for k, _ in qs})
+    base_order_id = next((v for k, v in qs if k == "orderId"), "")
     log.info(
-        "payment_created order_id=%s base_payment_page_url=%s query_keys=%s payment_url=%s",
+        "payment_created base_orderId=%s order_id=%s base_payment_page_url=%s query_keys=%s payment_url=%s",
+        base_order_id,
         order_id,
         settings.prodamus_payment_page_url,
         ",".join(query_keys),

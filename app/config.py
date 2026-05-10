@@ -106,7 +106,10 @@ def load_settings() -> Settings:
 
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     prodamus_secret_key = os.getenv("PRODAMUS_SECRET_KEY", "").strip()
-    prodamus_payment_page_url = _sanitize_payment_page_url(os.getenv("PRODAMUS_PAYMENT_PAGE_URL", ""))
+    raw_prodamus_payment_page_url = os.getenv("PRODAMUS_PAYMENT_PAGE_URL")
+    if raw_prodamus_payment_page_url is None or not raw_prodamus_payment_page_url.strip():
+        raise RuntimeError("PRODAMUS_PAYMENT_PAGE_URL is required")
+    prodamus_payment_page_url = _sanitize_payment_page_url(raw_prodamus_payment_page_url)
     webhook_base_url = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
 
     group_id_raw = os.getenv("GROUP_ID", "").strip()
