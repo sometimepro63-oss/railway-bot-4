@@ -5,13 +5,12 @@ from datetime import timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from aiogram import Bot, F, Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
-from sqlalchemy import desc, select, update
+from aiogram.types import Message, ReplyKeyboardRemove
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.payment import payment_keyboard
 from app.bot.keyboards.start_inline import start_inline_keyboard
 from app.config import Settings
 from app.db.models import Payment, PaymentStatus, SubscriptionStatus, User
@@ -21,6 +20,27 @@ from app.services.subscriptions import get_subscription, utcnow
 
 log = logging.getLogger(__name__)
 router = Router()
+
+START_TEXT = """Присоединяйся к моему закрытому каналу с готовыми рационами питания 🥗✨
+
+ 🍱 Каждую неделю — новые полезные и сбалансированные меню на 3 дня, так же дополнительно публикуются рецепты закусок, перекусов и десертов
+
+ 💰Доступ: 1490 руб. (разовая оплата, материалы остаются у тебя навсегда)
+
+ 📋Что уже есть внутри:
+ ▪️10+ готовых рационов из простых продуктов
+ (подходят для снижения веса и поддержания формы)
+ ▪️30+ видео-рецептов на каждый день
+ ▪️Подробный КБЖУ для каждого приёма пищи
+ ▪️Списки продуктов к каждому рациону
+ ▪️Точные граммовки (на 1 и на 3 порции)
+ ▪️Закуски на каждый день
+ ▪️Десерты
+ ▪️Удобная навигация по группе
+
+ После оплаты бот пришлет временную ссылку, которая будет работать 3 минуты, за это время надо добавиться в закрытый канал и потом начать когда будет удобно 💫
+
+ По любым вопросам пишите @irinasyic"""
 
 
 async def _upsert_user(session: AsyncSession, message: Message) -> None:
@@ -46,45 +66,25 @@ async def _upsert_user(session: AsyncSession, message: Message) -> None:
 
 
 @router.message(Command("start"))
-async def start_cmd(message: Message, session: AsyncSession, settings: Settings) -> None:
+async def start_cmd(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
     await _upsert_user(session, message)
-    text = (
-        "Присоединяйся к моему закрытому каналу с готовыми рационами питания\n\n"
-        "Каждую неделю — новые полезные и сбалансированные меню на 3 дня, так же дополнительно публикуются "
-        "рецепты закусок, перекусов и десертов\n\n"
-        "Доступ: 1490 руб. (разовая оплата, материалы остаются у тебя навсегда)\n\n"
-        "Что уже есть внутри:\n"
-        "10+ готовых рационов из простых продуктов\n"
-        "(подходят для снижения веса и поддержания формы)\n"
-        "30+ видео-рецептов на каждый день\n"
-        "Подробный КБЖУ для каждого приёма пищи\n"
-        "Списки продуктов к каждому рациону\n"
-        "Точные граммовки (на 1 и на 3 порции)\n"
-        "Закуски на каждый день\n"
-        "Десерты\n"
-        "Удобная навигация по группе\n\n"
-        "После оплаты бот пришлет временную ссылку, которая будет работать 3 минуты, за это время надо "
-        "добавиться в закрытый канал и потом начать когда будет удобно\n\n"
-        "По любым вопросам пишите @irinasyic"
-    )
-    tmp = await message.answer(".", reply_markup=ReplyKeyboardRemove())
-    try:
-        await tmp.delete()
-    except Exception:
-        pass
-    await message.answer(text, reply_markup=start_inline_keyboard())
-
-
-@router.callback_query(F.data == "buy")
-async def buy_inline(cb: CallbackQuery, bot: Bot, session: AsyncSession, settings: Settings) -> None:
-    if not cb.from_user:
-        await cb.answer()
+    if not message.from_user:
         return
-    await cb.answer()
-    await _buy_flow(cb.from_user.id, bot, session, settings)
+    telegram_id = message.from_user.id
+    short_url = await _create_payment(telegram_id, bot, session, settings)
+    sent = await message.answer(START_TEXT, reply_markup=ReplyKeyboardRemove(), disable_web_page_preview=True)
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=message.chat.id,
+            message_id=sent.message_id,
+            reply_markup=start_inline_keyboard(short_url),
+        )
+    except Exception:
+        log.exception("start_attach_keyboard_failed telegram_id=%s", telegram_id)
+    log.info("payment_link_sent telegram_id=%s order_id=%s", telegram_id, short_url.rsplit("/", 1)[-1])
 
 
-async def _buy_flow(telegram_id: int, bot: Bot, session: AsyncSession, settings: Settings) -> None:
+async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, settings: Settings) -> str:
     await session.execute(
         update(Payment)
         .where(
@@ -147,21 +147,20 @@ async def _buy_flow(telegram_id: int, bot: Bot, session: AsyncSession, settings:
         ",".join(query_keys),
         masked_url,
     )
-
-    await bot.send_message(
-        telegram_id,
-        "Для оплаты доступа нажмите кнопку ниже 👇\n\n"
-        "После успешной оплаты бот автоматически отправит ссылку для входа.\n\n"
-        "Ссылка на оплату действует ограниченное время. Если она устарела, нажмите «Оплатить» заново.",
-        reply_markup=payment_keyboard(short_url),
-    )
-    log.info("payment_link_sent telegram_id=%s order_id=%s", telegram_id, order_id)
+    return short_url
 
 
 @router.message(Command("buy"))
 async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
     await _upsert_user(session, message)
-    await _buy_flow(message.from_user.id, bot, session, settings)
+    if not message.from_user:
+        return
+    short_url = await _create_payment(message.from_user.id, bot, session, settings)
+    await message.answer(
+        "Для оплаты доступа нажмите кнопку ниже 👇",
+        reply_markup=start_inline_keyboard(short_url),
+    )
+    log.info("payment_link_sent telegram_id=%s order_id=%s", message.from_user.id, short_url.rsplit("/", 1)[-1])
 
 
 @router.message(Command("profile"))
