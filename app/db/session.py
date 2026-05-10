@@ -4,17 +4,12 @@ from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-
-def _normalize_db_url(url: str) -> str:
-    url = url.strip()
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    return url
+from app.db.utils import normalize_db_url
 
 
 def create_engine(database_url: str) -> AsyncEngine:
     return create_async_engine(
-        _normalize_db_url(database_url),
+        normalize_db_url(database_url.strip()),
         pool_pre_ping=True,
     )
 

@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db.models import Base
+from app.db.utils import normalize_db_url
 
 
 config = context.config
@@ -43,9 +44,7 @@ def _get_url() -> str:
             }
         )
         raise RuntimeError(f"Database URL is missing. Available database env keys: {', '.join(keys)}")
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    return url
+    return normalize_db_url(url)
 
 
 def run_migrations_offline() -> None:

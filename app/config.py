@@ -6,6 +6,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
+from app.db.utils import normalize_db_url
+
 
 def _parse_int_list(value: str | None) -> list[int]:
     if not value:
@@ -24,13 +26,6 @@ def _parse_bool(value: str | None) -> bool:
         return False
     v = value.strip().lower()
     return v in {"1", "true", "yes", "y", "on"}
-
-
-def _normalize_db_url(url: str) -> str:
-    url = url.strip()
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
-    return url
 
 
 def _sanitize_payment_page_url(url: str) -> str:
@@ -76,7 +71,7 @@ def _get_database_url() -> str:
             }
         )
         raise RuntimeError(f"Database URL is missing. Available database env keys: {', '.join(keys)}")
-    return _normalize_db_url(url)
+    return normalize_db_url(url)
 
 
 @dataclass(frozen=True, slots=True)
