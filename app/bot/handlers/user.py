@@ -108,6 +108,7 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
     data = {
         "do": "pay",
         "order_id": order_id,
+        "order_num": order_id,
         "products": [
             {
                 "name": settings.product_name,
@@ -120,7 +121,8 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
         "urlSuccess": back_url,
         "urlReturn": back_url,
         "urlNotification": f"{settings.webhook_base_url}/webhooks/prodamus",
-        "customer_extra": str(telegram_id),
+        "customer_extra": order_id,
+        "customer_extra_telegram_id": str(telegram_id),
     }
 
     url = build_payment_url(settings.prodamus_payment_page_url, settings.prodamus_secret_key, data)
@@ -135,10 +137,14 @@ async def _create_payment(telegram_id: int, bot: Bot, session: AsyncSession, set
     masked_url = urlunsplit((split.scheme, split.netloc, split.path, urlencode(masked_qs), split.fragment))
     query_keys = sorted({k for k, _ in qs})
     base_order_id = next((v for k, v in qs if k == "orderId"), "")
+    has_order_num = "order_num" in query_keys
+    has_customer_extra = "customer_extra" in query_keys
     log.info(
-        "payment_created base_orderId=%s order_id=%s base_payment_page_url=%s query_keys=%s payment_url=%s",
+        "payment_created base_orderId=%s internal_order_id=%s has_order_num=%s has_customer_extra=%s base_payment_page_url=%s query_keys=%s payment_url=%s",
         base_order_id,
         order_id,
+        has_order_num,
+        has_customer_extra,
         settings.prodamus_payment_page_url,
         ",".join(query_keys),
         masked_url,

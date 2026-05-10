@@ -100,27 +100,31 @@ async def prodamus_webhook(request: Request) -> dict:
     sign = request.headers.get("Sign") or request.headers.get("sign") or request.headers.get("SIGN")
 
     payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
-    customer_extra = _to_str(payload.get("customer_extra") if isinstance(payload, dict) else None)
+    payload_order_num = _to_str(payload.get("order_num") if isinstance(payload, dict) else None)
+    payload_customer_extra = _to_str(payload.get("customer_extra") if isinstance(payload, dict) else None)
     paid_detected, detected_status = _detect_paid(payload if isinstance(payload, dict) else {})
-    order_id_guess = _to_str(
+    payload_order_id = _to_str(
         payload.get("order_id") or payload.get("orderid") or payload.get("order") if isinstance(payload, dict) else None
     )
+    internal_order_id_guess = payload_order_num or payload_customer_extra or payload_order_id
 
     log.info(
-        "prodamus_webhook_received method=%s payload_keys=%s order_id=%s detected_status=%s paid=%s sign_present=%s customer_extra=%s",
+        "prodamus_webhook_received method=%s payload_keys=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s internal_order_id_guess=%s detected_status=%s paid=%s sign_present=%s",
         request.method,
         ",".join(payload_keys),
-        order_id_guess,
+        payload_order_id,
+        payload_order_num,
+        payload_customer_extra,
+        internal_order_id_guess,
         detected_status,
         paid_detected,
         bool(sign),
-        customer_extra,
     )
 
     signature_valid = verify_signature(payload, settings.prodamus_secret_key, sign)
     log.info(
-        "prodamus_webhook_signature_checked order_id=%s signature_valid=%s",
-        order_id_guess,
+        "prodamus_webhook_signature_checked internal_order_id_guess=%s signature_valid=%s",
+        internal_order_id_guess,
         signature_valid,
     )
     if not signature_valid:
@@ -128,10 +132,15 @@ async def prodamus_webhook(request: Request) -> dict:
         raise HTTPException(status_code=403, detail="invalid signature")
 
     if paid_detected is False:
-        log.info("prodamus_webhook_ignored order_id=%s detected_status=%s", order_id_guess, detected_status)
+        log.info(
+            "prodamus_webhook_ignored internal_order_id_guess=%s detected_status=%s",
+            internal_order_id_guess,
+            detected_status,
+        )
         return {"ok": True}
 
     webhook = extract_webhook(payload)
+    internal_order_id = payload_order_num or payload_customer_extra or webhook.order_id
 
     payment_telegram_id: int | None = None
     already_paid = False
@@ -140,7 +149,7 @@ async def prodamus_webhook(request: Request) -> dict:
     async with sessionmaker() as session:
         async with session.begin():
             res = await session.execute(
-                select(Payment).where(Payment.order_id == webhook.order_id).with_for_update()
+                select(Payment).where(Payment.order_id == internal_order_id).with_for_update()
             )
             payment = res.scalar_one_or_none()
             if payment is None:
@@ -150,8 +159,11 @@ async def prodamus_webhook(request: Request) -> dict:
                     )
                 ).scalars().all()
                 log.warning(
-                    "prodamus_payment_not_found order_id=%s recent_order_ids=%s",
-                    webhook.order_id,
+                    "prodamus_payment_not_found payload_order_id=%s payload_order_num=%s payload_customer_extra=%s internal_order_id=%s recent_order_ids=%s",
+                    payload_order_id,
+                    payload_order_num,
+                    payload_customer_extra,
+                    internal_order_id,
                     ",".join(recent),
                 )
                 raise HTTPException(status_code=400, detail="unknown order_id")
@@ -165,8 +177,8 @@ async def prodamus_webhook(request: Request) -> dict:
 
             if payment.amount != webhook.amount:
                 log.warning(
-                    "prodamus_amount_mismatch order_id=%s expected=%s got=%s",
-                    webhook.order_id,
+                    "prodamus_amount_mismatch internal_order_id=%s expected=%s got=%s",
+                    internal_order_id,
                     payment.amount,
                     webhook.amount,
                 )
@@ -174,8 +186,8 @@ async def prodamus_webhook(request: Request) -> dict:
 
             if webhook.currency and payment.currency and webhook.currency.lower() != payment.currency.lower():
                 log.warning(
-                    "prodamus_currency_mismatch order_id=%s expected=%s got=%s",
-                    webhook.order_id,
+                    "prodamus_currency_mismatch internal_order_id=%s expected=%s got=%s",
+                    internal_order_id,
                     payment.currency,
                     webhook.currency,
                 )
@@ -197,8 +209,8 @@ async def prodamus_webhook(request: Request) -> dict:
         raise HTTPException(status_code=500, detail="internal error")
 
     log.info(
-        "prodamus_webhook_payment_loaded order_id=%s payment_found=%s telegram_id=%s already_paid=%s",
-        webhook.order_id,
+        "prodamus_webhook_payment_loaded internal_order_id=%s payment_found=%s telegram_id=%s already_paid=%s",
+        internal_order_id,
         payment_found,
         payment_telegram_id,
         already_paid,
@@ -211,8 +223,8 @@ async def prodamus_webhook(request: Request) -> dict:
 
             if already_paid and invite_url:
                 log.info(
-                    "prodamus_invite_existing order_id=%s telegram_id=%s",
-                    webhook.order_id,
+                    "prodamus_invite_existing internal_order_id=%s telegram_id=%s",
+                    internal_order_id,
                     payment_telegram_id,
                 )
                 return {"ok": True}
@@ -246,16 +258,16 @@ async def prodamus_webhook(request: Request) -> dict:
             disable_web_page_preview=True,
         )
         log.info(
-            "prodamus_message_sent order_id=%s telegram_id=%s invite_created=%s",
-            webhook.order_id,
+            "prodamus_message_sent internal_order_id=%s telegram_id=%s invite_created=%s",
+            internal_order_id,
             payment_telegram_id,
             invite_created,
         )
     except Exception:
         log.exception("tg_send_invite_failed telegram_id=%s", payment_telegram_id)
         log.info(
-            "prodamus_message_failed order_id=%s telegram_id=%s invite_created=%s",
-            webhook.order_id,
+            "prodamus_message_failed internal_order_id=%s telegram_id=%s invite_created=%s",
+            internal_order_id,
             payment_telegram_id,
             invite_created,
         )
