@@ -25,7 +25,7 @@ Production-ready бот для продажи доступа в закрытую
 
 - `BOT_TOKEN`
 - `PRODAMUS_SECRET_KEY`
-- `PRODAMUS_PAYMENT_PAGE_URL` (например `https://demo.payform.ru/`)
+- `PRODAMUS_PAYMENT_PAGE_URL` (полная ссылка платёжной формы Prodamus; может содержать `paymentLinkId`, например `https://link.payform.ru/?paymentLinkId=...`)
 - `WEBHOOK_BASE_URL` (публичный base url вашего API, например `https://your-app.up.railway.app`)
 - `GROUP_ID` (id группы, обычно отрицательный)
 - `ADMIN_IDS` (через запятую)
@@ -41,6 +41,8 @@ Production-ready бот для продажи доступа в закрытую
 Этот endpoint делает `302` редирект на полный URL Prodamus, поэтому Telegram показывает аккуратный домен вашего приложения.
 
 Ссылка на оплату действует ограниченное время (переменная `PAYMENT_LINK_TTL_MINUTES`, по умолчанию 30 минут). Если ссылка устарела, нужно нажать “Купить доступ” заново.
+
+Важно: `PRODAMUS_PAYMENT_PAGE_URL` может содержать `paymentLinkId`, но не должен содержать параметры заказа (`orderId`, `order_id`, `products`, `signature` и т.п.). Если они есть, приложение выкинет их из query перед формированием ссылки.
 
 ## Как запустить бота
 

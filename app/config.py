@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
@@ -38,8 +38,26 @@ def _sanitize_payment_page_url(url: str) -> str:
     split = urlsplit(raw)
     if not split.scheme or not split.netloc:
         raise RuntimeError("PRODAMUS_PAYMENT_PAGE_URL is invalid")
-    base = urlunsplit((split.scheme, split.netloc, split.path or "/", "", ""))
-    return base
+    banned = {
+        "orderId",
+        "order_id",
+        "signature",
+        "do",
+        "customer_extra",
+        "urlSuccess",
+        "urlReturn",
+        "urlNotification",
+        "callbackType",
+        "currency",
+    }
+    kept: list[tuple[str, str]] = []
+    for k, v in parse_qsl(split.query, keep_blank_values=True):
+        if k in banned or k.startswith("products"):
+            continue
+        kept.append((k, v))
+
+    query = urlencode(kept, doseq=True) if kept else ""
+    return urlunsplit((split.scheme, split.netloc, split.path or "/", query, ""))
 
 
 def _get_database_url() -> str:

@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def _to_str(value: Any) -> str:
@@ -121,14 +121,32 @@ def _flatten(prefix: str, value: Any, out: list[tuple[str, str]]) -> None:
 
 def build_payment_url(payment_page_url: str, secret_key: str, data: dict[str, Any]) -> str:
     split = urlsplit(payment_page_url)
-    base = urlunsplit((split.scheme, split.netloc, split.path, "", ""))
+    banned = {
+        "orderId",
+        "order_id",
+        "signature",
+        "do",
+        "customer_extra",
+        "urlSuccess",
+        "urlReturn",
+        "urlNotification",
+        "callbackType",
+        "currency",
+    }
+    base_pairs: list[tuple[str, str]] = []
+    for k, v in parse_qsl(split.query, keep_blank_values=True):
+        if k in banned or k.startswith("products"):
+            continue
+        base_pairs.append((k, v))
+
     signature = create_signature(data, secret_key)
     signed = dict(data)
     signed["signature"] = signature
     pairs: list[tuple[str, str]] = []
+    pairs.extend(base_pairs)
     _flatten("", signed, pairs)
     query = urlencode(pairs, doseq=True)
-    return f"{base}?{query}"
+    return urlunsplit((split.scheme, split.netloc, split.path or "/", query, ""))
 
 
 @dataclass(frozen=True, slots=True)
