@@ -50,6 +50,27 @@ def _extract_internal_order_id_from_email(value: object) -> str:
     return ""
 
 
+def _preview_products(value: object) -> tuple[str, str]:
+    if value is None:
+        return ("none", "")
+    if isinstance(value, list):
+        try:
+            return ("list", json.dumps(value, ensure_ascii=False)[:1000])
+        except Exception:
+            return ("list", repr(value)[:1000])
+    if isinstance(value, dict):
+        try:
+            return ("dict", json.dumps(value, ensure_ascii=False)[:1000])
+        except Exception:
+            return ("dict", repr(value)[:1000])
+    if isinstance(value, str):
+        return ("str", value[:1000])
+    try:
+        return (type(value).__name__, json.dumps(value, ensure_ascii=False)[:1000])
+    except Exception:
+        return (type(value).__name__, repr(value)[:1000])
+
+
 async def _read_payload(request: Request) -> dict:
     body = await request.body()
     content_type = (request.headers.get("content-type") or "").lower()
@@ -117,11 +138,18 @@ async def prodamus_webhook(request: Request) -> dict:
     payload_customer_extra = _to_str(payload.get("customer_extra") if isinstance(payload, dict) else None)
     payload_customer_email = _to_str(payload.get("customer_email") if isinstance(payload, dict) else None)
     internal_order_id_from_email = _extract_internal_order_id_from_email(payload_customer_email)
+    products_type, products_preview = _preview_products(payload.get("products") if isinstance(payload, dict) else None)
     paid_detected, detected_status = _detect_paid(payload if isinstance(payload, dict) else {})
     payload_order_id = _to_str(
         payload.get("order_id") or payload.get("orderid") or payload.get("order") if isinstance(payload, dict) else None
     )
     internal_order_id_guess = payload_order_num or payload_customer_extra or payload_order_id
+
+    log.info(
+        "prodamus_webhook_products_debug products_type=%s products_preview=%s",
+        products_type,
+        products_preview,
+    )
 
     log.info(
         "prodamus_webhook_received method=%s payload_keys=%s query_internal_order_id=%s query_telegram_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s payload_customer_email=%s internal_order_id_from_email=%s internal_order_id_guess=%s detected_status=%s paid=%s sign_present=%s",
