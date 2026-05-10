@@ -39,7 +39,6 @@ def _sanitize_payment_page_url(url: str) -> str:
     if not split.scheme or not split.netloc:
         raise RuntimeError("PRODAMUS_PAYMENT_PAGE_URL is invalid")
     banned = {
-        "orderId",
         "order_id",
         "signature",
         "do",

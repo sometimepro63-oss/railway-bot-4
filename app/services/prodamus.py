@@ -122,7 +122,6 @@ def _flatten(prefix: str, value: Any, out: list[tuple[str, str]]) -> None:
 def build_payment_url(payment_page_url: str, secret_key: str, data: dict[str, Any]) -> str:
     split = urlsplit(payment_page_url)
     banned = {
-        "orderId",
         "order_id",
         "signature",
         "do",
