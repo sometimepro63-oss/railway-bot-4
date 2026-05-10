@@ -62,6 +62,24 @@ async def start_cmd(message: Message, session: AsyncSession, settings: Settings)
 async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
     await _upsert_user(session, message)
 
+    await session.execute(
+        select(Payment)
+        .where(
+            Payment.telegram_id == message.from_user.id,
+            Payment.status.in_([PaymentStatus.created, PaymentStatus.pending]),
+        )
+        .with_for_update()
+    )
+    await session.execute(
+        Payment.__table__
+        .update()
+        .where(
+            Payment.telegram_id == message.from_user.id,
+            Payment.status.in_([PaymentStatus.created.value, PaymentStatus.pending.value]),
+        )
+        .values(status=PaymentStatus.cancelled.value)
+    )
+
     order_id = uuid4().hex
     payment = Payment(
         telegram_id=message.from_user.id,
@@ -69,6 +87,7 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
         amount=settings.product_price,
         currency="rub",
         status=PaymentStatus.pending,
+        created_at=utcnow(),
     )
     session.add(payment)
     await session.flush()
@@ -93,6 +112,9 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
         "urlNotification": f"{settings.webhook_base_url}/webhooks/prodamus",
         "customer_extra": str(message.from_user.id),
     }
+    if settings.payment_link_ttl_minutes > 0:
+        link_expired = (utcnow() + timedelta(minutes=settings.payment_link_ttl_minutes)).strftime("%Y-%m-%d %H:%M")
+        data["link_expired"] = link_expired
 
     url = build_payment_url(settings.prodamus_payment_page_url, settings.prodamus_secret_key, data)
     payment.payment_url = url
@@ -102,7 +124,8 @@ async def buy_cmd(message: Message, bot: Bot, session: AsyncSession, settings: S
 
     await message.answer(
         "Для оплаты доступа нажмите кнопку ниже 👇\n\n"
-        "После успешной оплаты бот автоматически отправит ссылку для входа.",
+        "После успешной оплаты бот автоматически отправит ссылку для входа.\n\n"
+        "Ссылка на оплату действует ограниченное время. Если она устарела, нажмите ‘Купить доступ’ заново.",
         reply_markup=payment_keyboard(short_url),
     )
     log.info("payment_link_sent telegram_id=%s order_id=%s", message.from_user.id, order_id)
