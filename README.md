@@ -86,6 +86,8 @@ uvicorn app.main_api:app --host 0.0.0.0 --port 8000
 
 Если Railway даёт URL вида `postgresql://...`, код сам преобразует его в `postgresql+asyncpg://...`.
 
+Railway env diagnostics enabled.
+
 ## Деплой на Railway
 
 1) Создать GitHub repo
