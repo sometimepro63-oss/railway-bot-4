@@ -1,0 +1,11 @@
+aiogram>=3.4,<4
+fastapi>=0.110,<1
+uvicorn[standard]>=0.27,<1
+
+SQLAlchemy>=2.0,<3
+asyncpg>=0.29,<1
+alembic>=1.13,<2
+
+python-dotenv>=1.0,<2
+
+pytest>=8.0,<9
