@@ -52,12 +52,15 @@ START_TEXT = """Присоединяйся к моему закрытому ка
 🌿 По любым вопросам пишите @irinasyic"""
 
 def _get_start_photo() -> FSInputFile | None:
-    root = Path(__file__).resolve().parents[4]
-    assets_dir = root / "assets"
-    for name in ("start.jpg", "start.jpeg", "start.png", "start.webp"):
-        path = assets_dir / name
-        if path.exists():
-            return FSInputFile(str(path))
+    file_path = Path(__file__).resolve()
+    for base in (file_path.parent, *file_path.parents):
+        assets_dir = base / "assets"
+        if not assets_dir.is_dir():
+            continue
+        for name in ("start.jpg", "start.jpeg", "start.png", "start.webp"):
+            path = assets_dir / name
+            if path.exists():
+                return FSInputFile(str(path))
     return None
 
 
