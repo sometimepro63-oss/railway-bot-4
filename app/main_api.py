@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlsplit
 from aiogram import Dispatcher
 from aiogram.types import FSInputFile
 from fastapi import FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.routes.health import router as health_router
@@ -120,7 +120,7 @@ async def _reminder_once(
     settings: Settings,
 ) -> None:
     now = utcnow()
-    cutoff_expr = func.now() - func.make_interval(mins=settings.reminder_after_minutes)
+    cutoff_expr = func.now() - text(f"INTERVAL '{settings.reminder_after_minutes} minutes'")
     async with sessionmaker() as session:
         users = (
             await session.execute(
