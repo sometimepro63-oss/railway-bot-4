@@ -92,6 +92,8 @@ class Settings:
     access_days: int | None
     invite_link_expire_minutes: int
     payment_link_ttl_minutes: int
+    reminder_after_minutes: int
+    reminder_loop_seconds: int
 
     log_level: str = "INFO"
 
@@ -118,6 +120,8 @@ def load_settings() -> Settings:
     access_days = None if lifetime_access else int(os.getenv("ACCESS_DAYS", "30").strip())
     invite_link_expire_minutes = int(os.getenv("INVITE_LINK_EXPIRE_MINUTES", "3").strip())
     payment_link_ttl_minutes = int(os.getenv("PAYMENT_LINK_TTL_MINUTES", "30").strip())
+    reminder_after_minutes = int(os.getenv("REMINDER_AFTER_MINUTES", "1440").strip())
+    reminder_loop_seconds = int(os.getenv("REMINDER_LOOP_SECONDS", "600").strip())
 
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 
@@ -145,6 +149,8 @@ def load_settings() -> Settings:
         access_days=access_days,
         invite_link_expire_minutes=invite_link_expire_minutes,
         payment_link_ttl_minutes=payment_link_ttl_minutes,
+        reminder_after_minutes=reminder_after_minutes,
+        reminder_loop_seconds=reminder_loop_seconds,
         log_level=log_level,
     )
 

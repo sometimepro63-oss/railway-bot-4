@@ -29,9 +29,6 @@ from app.services.telegram_access import kick_then_unban
 
 log = logging.getLogger(__name__)
 
-_REMINDER_AFTER = timedelta(hours=24)
-_REMINDER_LOOP_SECONDS = 600
-
 settings = load_settings()
 setup_logging(settings.log_level)
 
@@ -123,7 +120,7 @@ async def _reminder_once(
     settings: Settings,
 ) -> None:
     now = utcnow()
-    cutoff = now - _REMINDER_AFTER
+    cutoff = now - timedelta(minutes=settings.reminder_after_minutes)
     async with sessionmaker() as session:
         users = (
             await session.execute(
@@ -197,7 +194,7 @@ async def _reminder_loop(
             await _reminder_once(sessionmaker, bot, settings)
         except Exception:
             log.exception("reminder_loop_failed")
-        await asyncio.sleep(_REMINDER_LOOP_SECONDS)
+        await asyncio.sleep(settings.reminder_loop_seconds)
 
 
 @app.on_event("startup")
