@@ -120,7 +120,7 @@ async def _reminder_once(
     settings: Settings,
 ) -> None:
     now = utcnow()
-    cutoff_expr = func.now() - func.make_interval(mins=settings.reminder_after_minutes)
+    cutoff_expr = func.now() - func.make_interval(0, 0, 0, 0, 0, settings.reminder_after_minutes)
     async with sessionmaker() as session:
         users = (
             await session.execute(
