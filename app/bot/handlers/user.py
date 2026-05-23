@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timezone
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -9,7 +10,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,11 +28,13 @@ router = Router()
 class EmailPaymentState(StatesGroup):
     waiting_for_email = State()
 
+_START_CAPTION_MAX = 1024
+
 START_TEXT = """Присоединяйся к моему закрытому каналу с готовыми рационами питания 🥗✨
 
- 🍱 Каждую неделю — новые полезные и сбалансированные меню на 3 дня, так же дополнительно публикуются рецепты закусок, перекусов и десертов
+ 🍱 Новые полезные и сбалансированные рационы публикуются регулярно, так же дополнительно публикуются рецепты закусок, перекусов и десертов 
 
- 💰Доступ: 1490 руб. (разовая оплата, материалы остаются у тебя навсегда)
+ 💰Доступ: 1390 руб. (разовая оплата, материалы остаются у тебя навсегда)
 
  📋Что уже есть внутри:
  ▪️10+ готовых рационов из простых продуктов
@@ -44,9 +47,18 @@ START_TEXT = """Присоединяйся к моему закрытому ка
  ▪️Десерты
  ▪️Удобная навигация по группе
 
- После оплаты бот пришлет временную ссылку, которая будет работать 3 минуты, за это время надо добавиться в закрытый канал и потом начать когда будет удобно 💫
+После оплаты бот пришлет временную ссылку, которая будет работать 3 минуты, за это время надо добавиться в закрытый канал и потом начать когда будет удобно 💫
 
- По любым вопросам пишите @irinasyic"""
+🌿 По любым вопросам пишите @irinasyic"""
+
+def _get_start_photo() -> FSInputFile | None:
+    root = Path(__file__).resolve().parents[4]
+    assets_dir = root / "assets"
+    for name in ("start.jpg", "start.jpeg", "start.png", "start.webp"):
+        path = assets_dir / name
+        if path.exists():
+            return FSInputFile(str(path))
+    return None
 
 
 async def _upsert_user(session: AsyncSession, message: Message) -> None:
@@ -79,6 +91,16 @@ async def start_cmd(message: Message, session: AsyncSession, settings: Settings)
         await tmp.delete()
     except Exception:
         pass
+    photo = _get_start_photo()
+    if photo and len(START_TEXT) <= _START_CAPTION_MAX:
+        await message.answer_photo(
+            photo=photo,
+            caption=START_TEXT,
+            reply_markup=start_inline_keyboard(),
+        )
+        return
+    if photo:
+        await message.answer_photo(photo=photo)
     await message.answer(
         START_TEXT,
         reply_markup=start_inline_keyboard(),
