@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from aiogram import Dispatcher
+from aiogram.types import FSInputFile
 from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -13,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.api.routes.health import router as health_router
 from app.api.routes.pay import router as pay_router
 from app.api.routes.webhooks import router as webhooks_router
+from app.bot.keyboards.start_inline import start_inline_keyboard
+from app.bot.messages import REMINDER_TEXT
 from app.config import Settings, load_settings
-from app.db.models import Subscription, SubscriptionStatus
+from app.db.models import Subscription, SubscriptionStatus, User
 from app.db.session import create_engine, create_sessionmaker
 from app.logging_setup import setup_logging
 from app.main_bot import create_bot, create_dispatcher
@@ -24,6 +29,9 @@ from app.services.telegram_access import kick_then_unban
 
 log = logging.getLogger(__name__)
 
+_REMINDER_AFTER = timedelta(hours=24)
+_REMINDER_LOOP_SECONDS = 600
+
 settings = load_settings()
 setup_logging(settings.log_level)
 
@@ -31,6 +39,18 @@ app = FastAPI()
 app.include_router(health_router)
 app.include_router(pay_router)
 app.include_router(webhooks_router)
+
+def _get_reminder_photo() -> FSInputFile | None:
+    file_path = Path(__file__).resolve()
+    for base in (file_path.parent, *file_path.parents):
+        assets_dir = base / "assets"
+        if not assets_dir.is_dir():
+            continue
+        for name in ("reminder.jpg", "reminder.jpeg", "reminder.png", "reminder.webp"):
+            path = assets_dir / name
+            if path.exists():
+                return FSInputFile(str(path))
+    return None
 
 
 async def _expire_once(
@@ -97,6 +117,88 @@ async def _expire_loop(
             log.exception("expire_loop_failed")
         await asyncio.sleep(3600)
 
+async def _reminder_once(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Any,
+    settings: Settings,
+) -> None:
+    now = utcnow()
+    cutoff = now - _REMINDER_AFTER
+    async with sessionmaker() as session:
+        users = (
+            await session.execute(
+                select(User)
+                .where(
+                    User.reminder_sent_at.is_(None),
+                    User.created_at < cutoff,
+                )
+                .limit(200)
+            )
+        ).scalars().all()
+
+    photo = _get_reminder_photo()
+
+    for u in users:
+        telegram_id = u.telegram_id
+        should_send = False
+        async with sessionmaker() as session:
+            async with session.begin():
+                locked = (
+                    await session.execute(
+                        select(User)
+                        .where(User.id == u.id)
+                        .with_for_update()
+                    )
+                ).scalar_one()
+                if locked.reminder_sent_at is not None:
+                    continue
+
+                sub = (
+                    await session.execute(
+                        select(Subscription).where(Subscription.telegram_id == telegram_id)
+                    )
+                ).scalar_one_or_none()
+
+                has_active_access = bool(
+                    sub
+                    and sub.status == SubscriptionStatus.active
+                    and (sub.expires_at is None or sub.expires_at > now)
+                )
+                locked.reminder_sent_at = now
+                should_send = not has_active_access
+
+        if not should_send:
+            continue
+
+        try:
+            if photo:
+                await bot.send_photo(telegram_id, photo=photo)
+        except Exception:
+            log.exception("reminder_photo_send_failed telegram_id=%s", telegram_id)
+
+        try:
+            await bot.send_message(
+                telegram_id,
+                REMINDER_TEXT,
+                reply_markup=start_inline_keyboard(),
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            log.exception("reminder_send_failed telegram_id=%s", telegram_id)
+
+
+async def _reminder_loop(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: Any,
+    settings: Settings,
+) -> None:
+    while True:
+        try:
+            await _reminder_once(sessionmaker, bot, settings)
+        except Exception:
+            log.exception("reminder_loop_failed")
+        await asyncio.sleep(_REMINDER_LOOP_SECONDS)
+
 
 @app.on_event("startup")
 async def on_startup() -> None:
@@ -122,17 +224,18 @@ async def on_startup() -> None:
 
     app.state.polling_task = asyncio.create_task(run_polling())
     app.state.expire_task = asyncio.create_task(_expire_loop(sessionmaker, bot, settings))
+    app.state.reminder_task = asyncio.create_task(_reminder_loop(sessionmaker, bot, settings))
 
     log.info("startup_complete")
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    for task_name in ("expire_task", "polling_task"):
+    for task_name in ("expire_task", "reminder_task", "polling_task"):
         task = getattr(app.state, task_name, None)
         if task:
             task.cancel()
-    for task_name in ("expire_task", "polling_task"):
+    for task_name in ("expire_task", "reminder_task", "polling_task"):
         task = getattr(app.state, task_name, None)
         if task:
             try:
