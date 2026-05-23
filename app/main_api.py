@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlsplit
 from aiogram import Dispatcher
 from aiogram.types import FSInputFile
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.routes.health import router as health_router
@@ -120,18 +120,21 @@ async def _reminder_once(
     settings: Settings,
 ) -> None:
     now = utcnow()
-    cutoff = now - timedelta(minutes=settings.reminder_after_minutes)
+    cutoff_expr = func.now() - func.make_interval(mins=settings.reminder_after_minutes)
     async with sessionmaker() as session:
         users = (
             await session.execute(
                 select(User)
                 .where(
                     User.reminder_sent_at.is_(None),
-                    User.created_at < cutoff,
+                    User.created_at < cutoff_expr,
                 )
+                .order_by(User.created_at.asc())
                 .limit(200)
             )
         ).scalars().all()
+    if users:
+        log.info("reminder_candidates=%s after_minutes=%s", len(users), settings.reminder_after_minutes)
 
     photo = _get_reminder_photo()
 
@@ -215,6 +218,11 @@ async def on_startup() -> None:
         "",
     )
     log.info("prodamus_payment_page_url_orderId=%s", base_order_id)
+    log.info(
+        "reminder_config after_minutes=%s loop_seconds=%s",
+        settings.reminder_after_minutes,
+        settings.reminder_loop_seconds,
+    )
 
     async def run_polling() -> None:
         await dp.start_polling(bot)

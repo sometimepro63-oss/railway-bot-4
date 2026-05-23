@@ -71,6 +71,12 @@ async def admin_user(message: Message, session: AsyncSession, settings: Settings
         out.append(f"telegram_id: {user.telegram_id}")
         out.append(f"username: {user.username or '-'}")
         out.append(f"name: {(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip())
+        out.append(f"created_at: {user.created_at.astimezone(timezone.utc).strftime('%d.%m.%Y %H:%M')}")
+        out.append(
+            "reminder_sent_at: -"
+            if user.reminder_sent_at is None
+            else f"reminder_sent_at: {user.reminder_sent_at.astimezone(timezone.utc).strftime('%d.%m.%Y %H:%M')}"
+        )
 
     if sub is None:
         out.append("Подписка: отсутствует")
@@ -80,6 +86,29 @@ async def admin_user(message: Message, session: AsyncSession, settings: Settings
         out.append(f"Доступ до: {expires}")
 
     await message.answer("\n".join(out))
+
+
+@router.message(Command("admin_reset_reminder"))
+async def admin_reset_reminder(message: Message, session: AsyncSession, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer("Использование: /admin_reset_reminder <telegram_id>")
+        return
+    telegram_id = int(parts[1])
+
+    user = (
+        await session.execute(select(User).where(User.telegram_id == telegram_id).with_for_update())
+    ).scalar_one_or_none()
+    if user is None:
+        await message.answer("Пользователь не найден")
+        return
+    user.reminder_sent_at = None
+    await session.flush()
+    await message.answer("Готово. reminder_sent_at сброшен.")
+    log.info("admin_reset_reminder telegram_id=%s", telegram_id)
 
 
 @router.message(Command("admin_extend"))
