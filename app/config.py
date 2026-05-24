@@ -53,6 +53,17 @@ def _sanitize_payment_page_url(url: str) -> str:
     query = urlencode(kept, doseq=True) if kept else ""
     return urlunsplit((split.scheme, split.netloc, split.path or "/", query, ""))
 
+def _sanitize_webhook_base_url(url: str) -> str:
+    raw = url.strip().rstrip("/")
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    split = urlsplit(raw)
+    if split.scheme not in {"http", "https"} or not split.netloc:
+        raise RuntimeError("WEBHOOK_BASE_URL is invalid")
+    return urlunsplit((split.scheme, split.netloc, "", "", "")).rstrip("/")
+
 
 def _get_database_url() -> str:
     candidates = (
@@ -107,7 +118,7 @@ def load_settings() -> Settings:
     if raw_prodamus_payment_page_url is None or not raw_prodamus_payment_page_url.strip():
         raise RuntimeError("PRODAMUS_PAYMENT_PAGE_URL is required")
     prodamus_payment_page_url = _sanitize_payment_page_url(raw_prodamus_payment_page_url)
-    webhook_base_url = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
+    webhook_base_url = _sanitize_webhook_base_url(os.getenv("WEBHOOK_BASE_URL", ""))
 
     group_id_raw = os.getenv("GROUP_ID", "").strip()
     admin_ids_raw = os.getenv("ADMIN_IDS", "").strip()
