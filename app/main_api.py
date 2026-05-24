@@ -164,8 +164,11 @@ async def _reminder_once(
                     and sub.status == SubscriptionStatus.active
                     and (sub.expires_at is None or sub.expires_at > now)
                 )
-                locked.reminder_sent_at = now
-                should_send = not has_active_access
+                if has_active_access:
+                    should_send = False
+                else:
+                    locked.reminder_sent_at = now
+                    should_send = True
 
         if not should_send:
             continue
