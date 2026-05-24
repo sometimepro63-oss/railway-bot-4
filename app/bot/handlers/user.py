@@ -85,10 +85,23 @@ async def _upsert_user(session: AsyncSession, message: Message) -> None:
     user.last_name = tg.last_name
     await session.flush()
 
+async def _mark_start(session: AsyncSession, message: Message) -> None:
+    tg = message.from_user
+    if tg is None:
+        return
+    res = await session.execute(select(User).where(User.telegram_id == tg.id).with_for_update())
+    user = res.scalar_one_or_none()
+    if user is None:
+        return
+    user.last_start_at = utcnow()
+    user.reminder_sent_at = None
+    await session.flush()
+
 
 @router.message(Command("start"))
 async def start_cmd(message: Message, session: AsyncSession, settings: Settings) -> None:
     await _upsert_user(session, message)
+    await _mark_start(session, message)
     tmp = await message.answer(".", reply_markup=ReplyKeyboardRemove())
     try:
         await tmp.delete()

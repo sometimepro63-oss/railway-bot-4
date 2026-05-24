@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlsplit
 from aiogram import Dispatcher
 from aiogram.types import FSInputFile
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.api.routes.health import router as health_router
@@ -126,8 +126,9 @@ async def _reminder_once(
             await session.execute(
                 select(User)
                 .where(
-                    User.reminder_sent_at.is_(None),
-                    User.created_at < cutoff,
+                    User.last_start_at.is_not(None),
+                    User.last_start_at < cutoff,
+                    or_(User.reminder_sent_at.is_(None), User.reminder_sent_at < User.last_start_at),
                 )
                 .order_by(User.created_at.asc())
                 .limit(200)

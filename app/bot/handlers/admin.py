@@ -73,6 +73,11 @@ async def admin_user(message: Message, session: AsyncSession, settings: Settings
         out.append(f"name: {(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip())
         out.append(f"created_at: {user.created_at.astimezone(timezone.utc).strftime('%d.%m.%Y %H:%M')}")
         out.append(
+            "last_start_at: -"
+            if user.last_start_at is None
+            else f"last_start_at: {user.last_start_at.astimezone(timezone.utc).strftime('%d.%m.%Y %H:%M')}"
+        )
+        out.append(
             "reminder_sent_at: -"
             if user.reminder_sent_at is None
             else f"reminder_sent_at: {user.reminder_sent_at.astimezone(timezone.utc).strftime('%d.%m.%Y %H:%M')}"
