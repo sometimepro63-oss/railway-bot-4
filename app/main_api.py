@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from aiogram import Dispatcher
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import FSInputFile
 from fastapi import FastAPI
 from sqlalchemy import or_, select
@@ -48,6 +49,23 @@ def _get_reminder_photo() -> FSInputFile | None:
             if path.exists():
                 return FSInputFile(str(path))
     return None
+
+
+async def _mark_reminder_sent(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    user_id: int,
+    now: Any,
+) -> None:
+    async with sessionmaker() as session:
+        user = (
+            await session.execute(
+                select(User).where(User.telegram_id == user_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if user is None:
+            return
+        user.reminder_sent_at = now
+        await session.commit()
 
 
 async def _expire_once(
@@ -176,6 +194,10 @@ async def _reminder_once(
         try:
             if photo:
                 await bot.send_photo(telegram_id, photo=photo)
+        except TelegramForbiddenError:
+            log.warning("reminder_user_blocked telegram_id=%s", telegram_id)
+            await _mark_reminder_sent(sessionmaker, telegram_id, now)
+            continue
         except Exception:
             log.exception("reminder_photo_send_failed telegram_id=%s", telegram_id)
 
@@ -186,6 +208,10 @@ async def _reminder_once(
                 reply_markup=start_inline_keyboard(),
                 disable_web_page_preview=True,
             )
+        except TelegramForbiddenError:
+            log.warning("reminder_user_blocked telegram_id=%s", telegram_id)
+            await _mark_reminder_sent(sessionmaker, telegram_id, now)
+            continue
         except Exception:
             log.exception("reminder_send_failed telegram_id=%s", telegram_id)
 
