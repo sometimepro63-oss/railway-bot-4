@@ -37,6 +37,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    broadcast_key: Mapped[str | None] = mapped_column(String(64))
+    broadcast_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
