@@ -276,6 +276,9 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
         await message.answer("Использование: /admin_broadcast_run <key>")
         return
 
+    await message.answer(f"Запускаю рассылку. key={key}")
+    log.info("admin_broadcast_run_started key=%s", key)
+
     now = utcnow()
     active_sub = and_(
         Subscription.status == SubscriptionStatus.active,
@@ -305,24 +308,26 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
 
         for user_id, telegram_id in rows:
             should_send = False
-            async with session.begin():
-                locked = (
-                    await session.execute(select(User).where(User.id == user_id).with_for_update())
-                ).scalar_one()
-                if locked.broadcast_key == key:
-                    skipped += 1
-                    continue
+            locked = (
+                await session.execute(select(User).where(User.id == user_id).with_for_update())
+            ).scalar_one()
+            if locked.broadcast_key == key:
+                skipped += 1
+                await session.commit()
+                continue
 
-                sub = (
-                    await session.execute(select(Subscription).where(Subscription.telegram_id == telegram_id))
-                ).scalar_one_or_none()
-                if _has_active_access(sub, now):
-                    skipped += 1
-                    continue
+            sub = (
+                await session.execute(select(Subscription).where(Subscription.telegram_id == telegram_id))
+            ).scalar_one_or_none()
+            if _has_active_access(sub, now):
+                skipped += 1
+                await session.commit()
+                continue
 
-                locked.broadcast_key = key
-                locked.broadcast_sent_at = now
-                should_send = True
+            locked.broadcast_key = key
+            locked.broadcast_sent_at = now
+            await session.commit()
+            should_send = True
 
             if not should_send:
                 continue
@@ -362,6 +367,13 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
         f"Отправлено: {sent}\n"
         f"Пропущено: {skipped}\n"
         f"Заблокировали бота: {blocked}"
+    )
+    log.info(
+        "admin_broadcast_run_finished key=%s sent=%s skipped=%s blocked=%s",
+        key,
+        sent,
+        skipped,
+        blocked,
     )
 
 
