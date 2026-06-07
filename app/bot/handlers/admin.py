@@ -9,7 +9,7 @@ from aiogram import Bot, Router
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import FSInputFile, Message
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -260,7 +260,7 @@ async def admin_broadcast_status(message: Message, session: AsyncSession, settin
         .outerjoin(Subscription, Subscription.telegram_id == User.telegram_id)
         .where(
             or_(Subscription.id.is_(None), ~active_sub),
-            or_(User.broadcast_key.is_(None), User.broadcast_key != key),
+            or_(User.broadcast_key.is_(None), User.broadcast_key != key, User.broadcast_sent_at.is_(None)),
         )
     )
     cnt = res.scalar_one()
@@ -297,7 +297,7 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
                 .outerjoin(Subscription, Subscription.telegram_id == User.telegram_id)
                 .where(
                     or_(Subscription.id.is_(None), ~active_sub),
-                    or_(User.broadcast_key.is_(None), User.broadcast_key != key),
+                    or_(User.broadcast_key.is_(None), User.broadcast_key != key, User.broadcast_sent_at.is_(None)),
                 )
                 .order_by(User.created_at.asc())
                 .limit(_BROADCAST_BATCH_LIMIT)
@@ -311,7 +311,7 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
             locked = (
                 await session.execute(select(User).where(User.id == user_id).with_for_update())
             ).scalar_one()
-            if locked.broadcast_key == key:
+            if locked.broadcast_key == key and locked.broadcast_sent_at is not None:
                 skipped += 1
                 await session.commit()
                 continue
@@ -325,7 +325,7 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
                 continue
 
             locked.broadcast_key = key
-            locked.broadcast_sent_at = now
+            locked.broadcast_sent_at = None
             await session.commit()
             should_send = True
 
@@ -350,9 +350,23 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
                         disable_web_page_preview=True,
                     )
                 sent += 1
+                sent_at = utcnow()
+                locked2 = (
+                    await session.execute(select(User).where(User.id == user_id).with_for_update())
+                ).scalar_one()
+                if locked2.broadcast_key == key and locked2.broadcast_sent_at is None:
+                    locked2.broadcast_sent_at = sent_at
+                await session.commit()
             except TelegramForbiddenError:
                 blocked += 1
                 log.warning("broadcast_user_blocked telegram_id=%s key=%s", telegram_id, key)
+                blocked_at = utcnow()
+                locked2 = (
+                    await session.execute(select(User).where(User.id == user_id).with_for_update())
+                ).scalar_one()
+                if locked2.broadcast_key == key and locked2.broadcast_sent_at is None:
+                    locked2.broadcast_sent_at = blocked_at
+                await session.commit()
             except Exception:
                 log.exception("broadcast_send_failed telegram_id=%s key=%s", telegram_id, key)
 
@@ -398,4 +412,23 @@ async def admin_reset_broadcast(message: Message, session: AsyncSession, setting
     await session.flush()
     await message.answer("Готово. broadcast_* сброшены.")
     log.info("admin_reset_broadcast telegram_id=%s", telegram_id)
+
+
+@router.message(Command("admin_reset_broadcast_key"))
+async def admin_reset_broadcast_key(message: Message, session: AsyncSession, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    key = _parse_key(message)
+    if not key:
+        await message.answer("Использование: /admin_reset_broadcast_key <key>")
+        return
+
+    res = await session.execute(
+        update(User)
+        .where(User.broadcast_key == key)
+        .values(broadcast_key=None, broadcast_sent_at=None)
+    )
+    await session.flush()
+    await message.answer(f"Готово. Сброшено пользователей для key={key}: {res.rowcount or 0}")
+    log.info("admin_reset_broadcast_key key=%s rows=%s", key, res.rowcount)
 
