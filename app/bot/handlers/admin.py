@@ -2,22 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timezone, timedelta
-from pathlib import Path
+from datetime import timezone
 
 from aiogram import Bot, Router
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, Message
-from sqlalchemy import and_, func, or_, select, update
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.keyboards.start_inline import start_inline_keyboard
 from app.config import Settings
-from app.db.models import Payment, PaymentStatus, Subscription, SubscriptionStatus, User
+from app.db.models import BroadcastTemplate, Payment, PaymentStatus, Subscription, SubscriptionStatus, User
 from app.services.subscriptions import ensure_subscription_paid, get_subscription, utcnow
 from app.services.telegram_access import kick_then_unban
-from app.bot.keyboards.start_inline import start_inline_keyboard
-from app.bot.messages import BROADCAST_TEXT
 
 
 log = logging.getLogger(__name__)
@@ -28,20 +28,12 @@ _BROADCAST_BATCH_LIMIT = 200
 _BROADCAST_SLEEP_SECONDS = 0.05
 
 
+class BroadcastDraftState(StatesGroup):
+    waiting_for_content = State()
+
+
 def _is_admin(message: Message, settings: Settings) -> bool:
     return bool(message.from_user) and message.from_user.id in set(settings.admin_ids)
-
-def _get_broadcast_photo() -> FSInputFile | None:
-    file_path = Path(__file__).resolve()
-    for base in (file_path.parent, *file_path.parents):
-        assets_dir = base / "assets"
-        if not assets_dir.is_dir():
-            continue
-        for name in ("broadcast.jpg", "broadcast.jpeg", "broadcast.png", "broadcast.webp"):
-            path = assets_dir / name
-            if path.exists():
-                return FSInputFile(str(path))
-    return None
 
 def _parse_key(message: Message) -> str | None:
     parts = (message.text or "").split()
@@ -50,11 +42,63 @@ def _parse_key(message: Message) -> str | None:
     key = parts[1].strip()
     return key or None
 
-def _has_active_access(sub: Subscription | None, now: object) -> bool:
-    return bool(
-        sub
-        and sub.status == SubscriptionStatus.active
-        and (sub.expires_at is None or sub.expires_at > now)
+
+def _extract_broadcast_payload(message: Message) -> tuple[str, str | None]:
+    text = (message.caption if message.photo else message.text or "").strip()
+    photo_file_id = message.photo[-1].file_id if message.photo else None
+    return text, photo_file_id
+
+
+async def _get_broadcast_template(
+    session: AsyncSession,
+    key: str,
+    *,
+    for_update: bool = False,
+) -> BroadcastTemplate | None:
+    query = select(BroadcastTemplate).where(BroadcastTemplate.key == key)
+    if for_update:
+        query = query.with_for_update()
+    return (await session.execute(query)).scalar_one_or_none()
+
+
+async def _send_broadcast_content(
+    bot: Bot,
+    telegram_id: int,
+    template: BroadcastTemplate,
+) -> None:
+    text = (template.text or "").strip()
+    photo_file_id = (template.photo_file_id or "").strip()
+
+    if photo_file_id and text and len(text) <= _BROADCAST_CAPTION_MAX:
+        await bot.send_photo(
+            telegram_id,
+            photo=photo_file_id,
+            caption=text,
+            reply_markup=start_inline_keyboard(),
+        )
+        return
+
+    if photo_file_id:
+        await bot.send_photo(telegram_id, photo=photo_file_id)
+
+    if text:
+        await bot.send_message(
+            telegram_id,
+            text,
+            reply_markup=start_inline_keyboard(),
+            disable_web_page_preview=True,
+        )
+
+
+def _broadcast_summary(template: BroadcastTemplate | None) -> str:
+    if template is None:
+        return "Шаблон: не сохранён"
+    text = (template.text or "").strip()
+    photo_file_id = (template.photo_file_id or "").strip()
+    return (
+        "Шаблон: сохранён\n"
+        f"Фото: {'да' if photo_file_id else 'нет'}\n"
+        f"Текст: {len(text)} символов"
     )
 
 
@@ -163,7 +207,7 @@ async def admin_extend(message: Message, session: AsyncSession, settings: Settin
     telegram_id = int(parts[1])
     days = int(parts[2])
 
-    sub = await ensure_subscription_paid(session, telegram_id, days)
+    sub = await ensure_subscription_paid(session, telegram_id, days, False)
     expires = sub.expires_at.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M")
     await message.answer(f"Готово. Доступ до: {expires}")
     log.info("admin_extend telegram_id=%s days=%s", telegram_id, days)
@@ -201,8 +245,99 @@ async def admin_revoke(message: Message, bot: Bot, session: AsyncSession, settin
     log.info("admin_revoke telegram_id=%s", telegram_id)
 
 
+@router.message(Command("admin_broadcast_set"))
+async def admin_broadcast_set(message: Message, state: FSMContext, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    key = _parse_key(message)
+    if not key:
+        await message.answer("Использование: /admin_broadcast_set <key>")
+        return
+    await state.set_state(BroadcastDraftState.waiting_for_content)
+    await state.update_data(broadcast_key=key)
+    await message.answer(
+        "Отправь следующим сообщением шаблон рассылки для этого key.\n"
+        "Поддерживается:\n"
+        "- обычный текст\n"
+        "- фото с подписью\n\n"
+        "Отмена: /admin_broadcast_cancel"
+    )
+
+
+@router.message(Command("admin_broadcast_cancel"))
+async def admin_broadcast_cancel(message: Message, state: FSMContext, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    await state.clear()
+    await message.answer("Ок, режим сохранения шаблона отменён.")
+
+
+@router.message(BroadcastDraftState.waiting_for_content)
+async def admin_broadcast_save_content(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> None:
+    if not _is_admin(message, settings):
+        await state.clear()
+        return
+    if (message.text or "").startswith("/"):
+        await message.answer("Сейчас я жду текст или фото с подписью. Для отмены используй /admin_broadcast_cancel")
+        return
+
+    data = await state.get_data()
+    key = str(data.get("broadcast_key") or "").strip()
+    if not key:
+        await state.clear()
+        await message.answer("Не удалось определить key. Запусти команду ещё раз: /admin_broadcast_set <key>")
+        return
+
+    text, photo_file_id = _extract_broadcast_payload(message)
+    if not text and not photo_file_id:
+        await message.answer("Нужен текст или фото с подписью. Попробуй ещё раз, либо /admin_broadcast_cancel")
+        return
+
+    template = await _get_broadcast_template(session, key, for_update=True)
+    if template is None:
+        template = BroadcastTemplate(key=key)
+        session.add(template)
+
+    template.text = text or None
+    template.photo_file_id = photo_file_id or None
+    await session.flush()
+    await state.clear()
+    await message.answer(f"Шаблон сохранён. key={key}\n{_broadcast_summary(template)}")
+
+
+@router.message(Command("admin_broadcast_preview"))
+async def admin_broadcast_preview(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
+    if not _is_admin(message, settings):
+        return
+    if not message.from_user:
+        return
+    key = _parse_key(message)
+    if not key:
+        await message.answer("Использование: /admin_broadcast_preview <key>")
+        return
+
+    template = await _get_broadcast_template(session, key)
+    if template is None:
+        await message.answer(f"Для key={key} шаблон не найден. Сначала используй /admin_broadcast_set <key>")
+        return
+
+    try:
+        await _send_broadcast_content(bot, message.from_user.id, template)
+    except Exception:
+        log.exception("admin_broadcast_preview_failed telegram_id=%s key=%s", message.from_user.id, key)
+        await message.answer("Не получилось отправить превью. Посмотри логи.")
+        return
+
+    await message.answer(f"Превью отправлено. key={key}")
+
+
 @router.message(Command("admin_broadcast_test"))
-async def admin_broadcast_test(message: Message, bot: Bot, settings: Settings) -> None:
+async def admin_broadcast_test(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
     if not _is_admin(message, settings):
         return
     if not message.from_user:
@@ -212,26 +347,15 @@ async def admin_broadcast_test(message: Message, bot: Bot, settings: Settings) -
         await message.answer("Использование: /admin_broadcast_test <key>")
         return
 
-    photo = _get_broadcast_photo()
+    template = await _get_broadcast_template(session, key)
+    if template is None:
+        await message.answer(f"Для key={key} шаблон не найден. Сначала используй /admin_broadcast_set <key>")
+        return
+
     telegram_id = message.from_user.id
 
     try:
-        if photo and len(BROADCAST_TEXT) <= _BROADCAST_CAPTION_MAX:
-            await bot.send_photo(
-                telegram_id,
-                photo=photo,
-                caption=BROADCAST_TEXT,
-                reply_markup=start_inline_keyboard(),
-            )
-        else:
-            if photo:
-                await bot.send_photo(telegram_id, photo=photo)
-            await bot.send_message(
-                telegram_id,
-                BROADCAST_TEXT,
-                reply_markup=start_inline_keyboard(),
-                disable_web_page_preview=True,
-            )
+        await _send_broadcast_content(bot, telegram_id, template)
     except Exception:
         log.exception("admin_broadcast_test_failed telegram_id=%s key=%s", telegram_id, key)
         await message.answer("Не получилось отправить тест. Посмотрите логи.")
@@ -249,26 +373,23 @@ async def admin_broadcast_status(message: Message, session: AsyncSession, settin
         await message.answer("Использование: /admin_broadcast_status <key>")
         return
 
-    now = utcnow()
-    active_sub = and_(
-        Subscription.status == SubscriptionStatus.active,
-        or_(Subscription.expires_at.is_(None), Subscription.expires_at > now),
-    )
+    template = await _get_broadcast_template(session, key)
     res = await session.execute(
         select(func.count())
         .select_from(User)
         .outerjoin(Subscription, Subscription.telegram_id == User.telegram_id)
         .where(
-            # Требование из бизнеса: рассылать тем, кто запускал бота, но не покупал доступ.
-            # "Запускал" = есть last_start_at.
-            # "Не покупал" = ни разу не было подписки (таблица subscriptions).
             User.last_start_at.is_not(None),
             Subscription.id.is_(None),
             or_(User.broadcast_key.is_(None), User.broadcast_key != key, User.broadcast_sent_at.is_(None)),
         )
     )
     cnt = res.scalar_one()
-    await message.answer(f"Готово. Получателей (запускали бота, но не покупали доступ) для key={key}: {cnt}")
+    await message.answer(
+        f"Статус рассылки. key={key}\n"
+        f"{_broadcast_summary(template)}\n"
+        f"Получателей (запускали бота, но не покупали доступ): {cnt}"
+    )
 
 
 @router.message(Command("admin_broadcast_run"))
@@ -280,15 +401,14 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
         await message.answer("Использование: /admin_broadcast_run <key>")
         return
 
+    template = await _get_broadcast_template(session, key)
+    if template is None:
+        await message.answer(f"Для key={key} шаблон не найден. Сначала используй /admin_broadcast_set <key>")
+        return
+
     await message.answer(f"Запускаю рассылку. key={key}")
     log.info("admin_broadcast_run_started key=%s", key)
 
-    now = utcnow()
-    active_sub = and_(
-        Subscription.status == SubscriptionStatus.active,
-        or_(Subscription.expires_at.is_(None), Subscription.expires_at > now),
-    )
-    photo = _get_broadcast_photo()
     sent = 0
     skipped = 0
     blocked = 0
@@ -300,8 +420,6 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
                 .select_from(User)
                 .outerjoin(Subscription, Subscription.telegram_id == User.telegram_id)
                 .where(
-                    # Рассылка только тем, кто запускал /start (last_start_at),
-                    # и ни разу не покупал доступ (нет записи в subscriptions).
                     User.last_start_at.is_not(None),
                     Subscription.id.is_(None),
                     or_(User.broadcast_key.is_(None), User.broadcast_key != key, User.broadcast_sent_at.is_(None)),
@@ -326,7 +444,7 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
             sub = (
                 await session.execute(select(Subscription).where(Subscription.telegram_id == telegram_id))
             ).scalar_one_or_none()
-            if _has_active_access(sub, now):
+            if sub is not None:
                 skipped += 1
                 await session.commit()
                 continue
@@ -340,22 +458,7 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
                 continue
 
             try:
-                if photo and len(BROADCAST_TEXT) <= _BROADCAST_CAPTION_MAX:
-                    await bot.send_photo(
-                        telegram_id,
-                        photo=photo,
-                        caption=BROADCAST_TEXT,
-                        reply_markup=start_inline_keyboard(),
-                    )
-                else:
-                    if photo:
-                        await bot.send_photo(telegram_id, photo=photo)
-                    await bot.send_message(
-                        telegram_id,
-                        BROADCAST_TEXT,
-                        reply_markup=start_inline_keyboard(),
-                        disable_web_page_preview=True,
-                    )
+                await _send_broadcast_content(bot, telegram_id, template)
                 sent += 1
                 sent_at = utcnow()
                 locked2 = (

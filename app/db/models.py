@@ -47,6 +47,22 @@ class User(Base):
     )
 
 
+class BroadcastTemplate(Base):
+    __tablename__ = "broadcast_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    text: Mapped[str | None] = mapped_column(Text)
+    photo_file_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class Payment(Base):
     __tablename__ = "payments"
 
@@ -101,4 +117,3 @@ class InviteLink(Base):
 
 
 Index("ix_payments_telegram_id_created_at", Payment.telegram_id, Payment.created_at)
-
