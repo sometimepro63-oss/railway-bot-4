@@ -259,12 +259,16 @@ async def admin_broadcast_status(message: Message, session: AsyncSession, settin
         .select_from(User)
         .outerjoin(Subscription, Subscription.telegram_id == User.telegram_id)
         .where(
-            or_(Subscription.id.is_(None), ~active_sub),
+            # Требование из бизнеса: рассылать тем, кто запускал бота, но не покупал доступ.
+            # "Запускал" = есть last_start_at.
+            # "Не покупал" = ни разу не было подписки (таблица subscriptions).
+            User.last_start_at.is_not(None),
+            Subscription.id.is_(None),
             or_(User.broadcast_key.is_(None), User.broadcast_key != key, User.broadcast_sent_at.is_(None)),
         )
     )
     cnt = res.scalar_one()
-    await message.answer(f"Готово. Получателей без активной подписки для key={key}: {cnt}")
+    await message.answer(f"Готово. Получателей (запускали бота, но не покупали доступ) для key={key}: {cnt}")
 
 
 @router.message(Command("admin_broadcast_run"))
@@ -296,7 +300,10 @@ async def admin_broadcast_run(message: Message, bot: Bot, session: AsyncSession,
                 .select_from(User)
                 .outerjoin(Subscription, Subscription.telegram_id == User.telegram_id)
                 .where(
-                    or_(Subscription.id.is_(None), ~active_sub),
+                    # Рассылка только тем, кто запускал /start (last_start_at),
+                    # и ни разу не покупал доступ (нет записи в subscriptions).
+                    User.last_start_at.is_not(None),
+                    Subscription.id.is_(None),
                     or_(User.broadcast_key.is_(None), User.broadcast_key != key, User.broadcast_sent_at.is_(None)),
                 )
                 .order_by(User.created_at.asc())
@@ -431,4 +438,3 @@ async def admin_reset_broadcast_key(message: Message, session: AsyncSession, set
     await session.flush()
     await message.answer(f"Готово. Сброшено пользователей для key={key}: {res.rowcount or 0}")
     log.info("admin_reset_broadcast_key key=%s rows=%s", key, res.rowcount)
-
