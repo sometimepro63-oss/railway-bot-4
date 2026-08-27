@@ -27,3 +27,4 @@ yarn-error.log*
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+start.sh.bak
