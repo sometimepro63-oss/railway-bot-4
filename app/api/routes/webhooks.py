@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import timedelta
+from time import perf_counter
 
 from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy import select
@@ -114,6 +116,131 @@ async def _get_existing_invite(
     return res.scalar_one_or_none()
 
 
+async def _send_invite_message_background(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: object,
+    settings: Settings,
+    internal_order_id: str,
+    telegram_id: int,
+) -> None:
+    """
+    ВАЖНО: эта функция запускается в фоне (asyncio task).
+    Вебхук Prodamus должен отвечать быстро (<5 секунд), поэтому тяжёлое (Telegram API)
+    вынесено сюда.
+    """
+    started = perf_counter()
+    try:
+        invite_url: str | None = None
+        invite_created = False
+
+        # 1) Защитимся от дублей: если invite уже отправляли — выходим.
+        async with sessionmaker() as session:
+            async with session.begin():
+                payment = (
+                    await session.execute(
+                        select(Payment)
+                        .where(Payment.order_id == internal_order_id)
+                        .with_for_update()
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if payment is None:
+                    log.warning(
+                        "invite_bg_payment_missing internal_order_id=%s telegram_id=%s",
+                        internal_order_id,
+                        telegram_id,
+                    )
+                    return
+                if payment.invite_sent_at is not None:
+                    log.info(
+                        "invite_bg_already_sent internal_order_id=%s telegram_id=%s",
+                        internal_order_id,
+                        telegram_id,
+                    )
+                    return
+
+        # 2) Ищем валидную (неиспользованную и неистёкшую) ссылку; если нет — создаём.
+        # Telegram иногда отвечает медленно/с ошибками, поэтому делаем несколько попыток.
+        last_err: Exception | None = None
+        for attempt, delay_s in enumerate((0.0, 2.0, 5.0), start=1):
+            if delay_s:
+                await asyncio.sleep(delay_s)
+            try:
+                async with sessionmaker() as session:
+                    async with session.begin():
+                        existing = await _get_existing_invite(session, telegram_id)
+                        invite_url = existing.invite_link if existing else None
+
+                        if not invite_url:
+                            expire_at = utcnow() + timedelta(minutes=settings.invite_link_expire_minutes)
+                            invite = await create_one_time_invite(bot, settings.group_id, expire_at)
+                            invite_url = invite.invite_link
+                            invite_created = True
+                            session.add(
+                                InviteLink(
+                                    telegram_id=telegram_id,
+                                    invite_link=invite_url,
+                                    expire_at=expire_at,
+                                    used=False,
+                                )
+                            )
+
+                await bot.send_message(
+                    telegram_id,
+                    "Оплата прошла успешно ✅\n\n"
+                    "Вот ссылка для входа в закрытый канал:\n"
+                    f"{invite_url}\n\n"
+                    "Ссылка действует 3 минуты.",
+                    disable_web_page_preview=True,
+                )
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                log.warning(
+                    "invite_bg_attempt_failed internal_order_id=%s telegram_id=%s attempt=%s err=%s",
+                    internal_order_id,
+                    telegram_id,
+                    attempt,
+                    type(e).__name__,
+                )
+        if last_err is not None:
+            raise last_err
+
+        # 4) Помечаем, что ссылка отправлена (для идемпотентности).
+        async with sessionmaker() as session:
+            async with session.begin():
+                payment = (
+                    await session.execute(
+                        select(Payment)
+                        .where(Payment.order_id == internal_order_id)
+                        .with_for_update()
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if payment is None:
+                    return
+                if payment.invite_sent_at is None:
+                    payment.invite_sent_at = utcnow()
+
+        log.info(
+            "invite_bg_sent internal_order_id=%s telegram_id=%s invite_created=%s duration_ms=%s",
+            internal_order_id,
+            telegram_id,
+            invite_created,
+            int((perf_counter() - started) * 1000),
+        )
+    except Exception:
+        # Ничего не кидаем наружу — иначе это убьёт таску без нормального лога.
+        log.exception(
+            "invite_bg_failed internal_order_id=%s telegram_id=%s duration_ms=%s",
+            internal_order_id,
+            telegram_id,
+            int((perf_counter() - started) * 1000),
+        )
+
+
 @router.get("/webhooks/prodamus")
 async def prodamus_webhook_alive() -> dict:
     return {
@@ -124,6 +251,7 @@ async def prodamus_webhook_alive() -> dict:
 
 @router.post("/webhooks/prodamus")
 async def prodamus_webhook(request: Request) -> dict:
+    started = perf_counter()
     settings: Settings = request.app.state.settings
     sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
     bot = request.app.state.bot
@@ -326,62 +454,22 @@ async def prodamus_webhook(request: Request) -> dict:
         already_paid,
     )
 
-    async with sessionmaker() as session:
-        async with session.begin():
-            existing = await _get_existing_invite(session, payment_telegram_id)
-            invite_url = existing.invite_link if existing else None
-
-            if already_paid and invite_url:
-                log.info(
-                    "prodamus_invite_existing internal_order_id=%s telegram_id=%s",
-                    internal_order_id,
-                    payment_telegram_id,
-                )
-                return {"ok": True}
-
-            invite_created = False
-            if not invite_url:
-                expire_at = utcnow() + timedelta(minutes=settings.invite_link_expire_minutes)
-                try:
-                    invite = await create_one_time_invite(bot, settings.group_id, expire_at)
-                    invite_url = invite.invite_link
-                    invite_created = True
-                except Exception:
-                    log.exception("tg_create_invite_failed telegram_id=%s", payment_telegram_id)
-                    raise HTTPException(status_code=502, detail="telegram invite failed")
-                session.add(
-                    InviteLink(
-                        telegram_id=payment_telegram_id,
-                        invite_link=invite_url,
-                        expire_at=expire_at,
-                        used=False,
-                    )
-                )
-
-    try:
-        await bot.send_message(
-            payment_telegram_id,
-            "Оплата прошла успешно ✅\n\n"
-            "Вот ссылка для входа в закрытый канал:\n"
-            f"{invite_url}\n\n"
-            "Ссылка действует 3 минуты.",
-            disable_web_page_preview=True,
+    # КРИТИЧНО: Prodamus ждёт ответ ограниченное время (обычно ~5 секунд).
+    # Всё, что может тормозить (Telegram API), переносим в фон и отвечаем сразу.
+    asyncio.create_task(
+        _send_invite_message_background(
+            sessionmaker=sessionmaker,
+            bot=bot,
+            settings=settings,
+            internal_order_id=internal_order_id,
+            telegram_id=payment_telegram_id,
         )
-        log.info(
-            "prodamus_message_sent internal_order_id=%s telegram_id=%s invite_created=%s",
-            internal_order_id,
-            payment_telegram_id,
-            invite_created,
-        )
-    except Exception:
-        log.exception("tg_send_invite_failed telegram_id=%s", payment_telegram_id)
-        log.info(
-            "prodamus_message_failed internal_order_id=%s telegram_id=%s invite_created=%s",
-            internal_order_id,
-            payment_telegram_id,
-            invite_created,
-        )
-        raise HTTPException(status_code=502, detail="telegram send failed")
+    )
 
+    log.info(
+        "prodamus_webhook_acked internal_order_id=%s telegram_id=%s duration_ms=%s",
+        internal_order_id,
+        payment_telegram_id,
+        int((perf_counter() - started) * 1000),
+    )
     return {"ok": True}
-

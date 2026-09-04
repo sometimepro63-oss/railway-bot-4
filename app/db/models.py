@@ -82,6 +82,7 @@ class Payment(Base):
     raw_payload: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invite_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Subscription(Base):
