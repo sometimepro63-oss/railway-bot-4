@@ -1,0 +1,475 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import timedelta
+from time import perf_counter
+
+from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.config import Settings
+from app.db.models import InviteLink, Payment, PaymentStatus
+from app.services.prodamus import extract_webhook, parse_bracketed_params, verify_signature
+from app.services.subscriptions import ensure_subscription_paid, utcnow
+from app.services.telegram_access import create_one_time_invite
+
+
+log = logging.getLogger(__name__)
+router = APIRouter()
+
+
+def _to_str(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _parse_bool(value: object) -> bool:
+    v = _to_str(value).strip().lower()
+    return v in {"1", "true", "yes", "y", "on"}
+
+
+def _detect_paid(payload: dict) -> tuple[bool | None, str]:
+    status = _to_str(payload.get("status") or payload.get("payment_status")).strip().lower()
+    if status:
+        return (status in {"paid", "success"}, status)
+    if "paid" in payload:
+        return (_parse_bool(payload.get("paid")), _to_str(payload.get("paid")))
+    return (None, "")
+
+
+def _extract_internal_order_id_from_email(value: object) -> str:
+    email = _to_str(value).strip().lower()
+    if not email:
+        return ""
+    prefix = "order_"
+    suffix = "@bot.local"
+    if email.startswith(prefix) and email.endswith(suffix) and len(email) > len(prefix) + len(suffix):
+        return email[len(prefix) : -len(suffix)]
+    return ""
+
+
+def _preview_products(value: object) -> tuple[str, str]:
+    if value is None:
+        return ("none", "")
+    if isinstance(value, list):
+        try:
+            return ("list", json.dumps(value, ensure_ascii=False)[:1000])
+        except Exception:
+            return ("list", repr(value)[:1000])
+    if isinstance(value, dict):
+        try:
+            return ("dict", json.dumps(value, ensure_ascii=False)[:1000])
+        except Exception:
+            return ("dict", repr(value)[:1000])
+    if isinstance(value, str):
+        return ("str", value[:1000])
+    try:
+        return (type(value).__name__, json.dumps(value, ensure_ascii=False)[:1000])
+    except Exception:
+        return (type(value).__name__, repr(value)[:1000])
+
+
+async def _read_payload(request: Request) -> dict:
+    body = await request.body()
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    if "application/json" in content_type:
+        if not body:
+            return {}
+        data = json.loads(body.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="invalid json")
+        return data
+
+    form = await request.form()
+    flat: dict[str, str] = {}
+    for k, v in form.multi_items():
+        if k not in flat:
+            flat[k] = str(v)
+    if any("[" in k for k in flat.keys()):
+        try:
+            return parse_bracketed_params(flat)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid form data")
+    return dict(flat)
+
+
+async def _get_existing_invite(
+    session: AsyncSession,
+    telegram_id: int,
+) -> InviteLink | None:
+    now = utcnow()
+    res = await session.execute(
+        select(InviteLink)
+        .where(
+            InviteLink.telegram_id == telegram_id,
+            InviteLink.used.is_(False),
+            InviteLink.expire_at > now,
+        )
+        .order_by(InviteLink.created_at.desc())
+        .limit(1)
+    )
+    return res.scalar_one_or_none()
+
+
+async def _send_invite_message_background(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    bot: object,
+    settings: Settings,
+    internal_order_id: str,
+    telegram_id: int,
+) -> None:
+    """
+    ВАЖНО: эта функция запускается в фоне (asyncio task).
+    Вебхук Prodamus должен отвечать быстро (<5 секунд), поэтому тяжёлое (Telegram API)
+    вынесено сюда.
+    """
+    started = perf_counter()
+    try:
+        invite_url: str | None = None
+        invite_created = False
+
+        # 1) Защитимся от дублей: если invite уже отправляли — выходим.
+        async with sessionmaker() as session:
+            async with session.begin():
+                payment = (
+                    await session.execute(
+                        select(Payment)
+                        .where(Payment.order_id == internal_order_id)
+                        .with_for_update()
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if payment is None:
+                    log.warning(
+                        "invite_bg_payment_missing internal_order_id=%s telegram_id=%s",
+                        internal_order_id,
+                        telegram_id,
+                    )
+                    return
+                if payment.invite_sent_at is not None:
+                    log.info(
+                        "invite_bg_already_sent internal_order_id=%s telegram_id=%s",
+                        internal_order_id,
+                        telegram_id,
+                    )
+                    return
+
+        # 2) Ищем валидную (неиспользованную и неистёкшую) ссылку; если нет — создаём.
+        # Telegram иногда отвечает медленно/с ошибками, поэтому делаем несколько попыток.
+        last_err: Exception | None = None
+        for attempt, delay_s in enumerate((0.0, 2.0, 5.0), start=1):
+            if delay_s:
+                await asyncio.sleep(delay_s)
+            try:
+                async with sessionmaker() as session:
+                    async with session.begin():
+                        existing = await _get_existing_invite(session, telegram_id)
+                        invite_url = existing.invite_link if existing else None
+
+                        if not invite_url:
+                            expire_at = utcnow() + timedelta(minutes=settings.invite_link_expire_minutes)
+                            invite = await create_one_time_invite(bot, settings.group_id, expire_at)
+                            invite_url = invite.invite_link
+                            invite_created = True
+                            session.add(
+                                InviteLink(
+                                    telegram_id=telegram_id,
+                                    invite_link=invite_url,
+                                    expire_at=expire_at,
+                                    used=False,
+                                )
+                            )
+
+                await bot.send_message(
+                    telegram_id,
+                    "Оплата прошла успешно ✅\n\n"
+                    "Вот ссылка для входа в закрытый канал:\n"
+                    f"{invite_url}\n\n"
+                    "Ссылка действует 3 минуты.",
+                    disable_web_page_preview=True,
+                )
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                log.warning(
+                    "invite_bg_attempt_failed internal_order_id=%s telegram_id=%s attempt=%s err=%s",
+                    internal_order_id,
+                    telegram_id,
+                    attempt,
+                    type(e).__name__,
+                )
+        if last_err is not None:
+            raise last_err
+
+        # 4) Помечаем, что ссылка отправлена (для идемпотентности).
+        async with sessionmaker() as session:
+            async with session.begin():
+                payment = (
+                    await session.execute(
+                        select(Payment)
+                        .where(Payment.order_id == internal_order_id)
+                        .with_for_update()
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if payment is None:
+                    return
+                if payment.invite_sent_at is None:
+                    payment.invite_sent_at = utcnow()
+
+        log.info(
+            "invite_bg_sent internal_order_id=%s telegram_id=%s invite_created=%s duration_ms=%s",
+            internal_order_id,
+            telegram_id,
+            invite_created,
+            int((perf_counter() - started) * 1000),
+        )
+    except Exception:
+        # Ничего не кидаем наружу — иначе это убьёт таску без нормального лога.
+        log.exception(
+            "invite_bg_failed internal_order_id=%s telegram_id=%s duration_ms=%s",
+            internal_order_id,
+            telegram_id,
+            int((perf_counter() - started) * 1000),
+        )
+
+
+@router.get("/webhooks/prodamus")
+async def prodamus_webhook_alive() -> dict:
+    return {
+        "ok": True,
+        "message": "Prodamus webhook endpoint is alive. Use POST for payment notifications.",
+    }
+
+
+@router.post("/webhooks/prodamus")
+async def prodamus_webhook(request: Request) -> dict:
+    started = perf_counter()
+    settings: Settings = request.app.state.settings
+    sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
+    bot = request.app.state.bot
+
+    payload = await _read_payload(request)
+    sign = request.headers.get("Sign") or request.headers.get("sign") or request.headers.get("SIGN")
+    query_internal_order_id = _to_str(request.query_params.get("internal_order_id"))
+    query_telegram_id = _to_str(request.query_params.get("telegram_id"))
+
+    payload_keys = sorted(payload.keys()) if isinstance(payload, dict) else []
+    payload_order_num = _to_str(payload.get("order_num") if isinstance(payload, dict) else None)
+    payload_customer_extra = _to_str(payload.get("customer_extra") if isinstance(payload, dict) else None)
+    payload_customer_email = _to_str(payload.get("customer_email") if isinstance(payload, dict) else None)
+    internal_order_id_from_email = _extract_internal_order_id_from_email(payload_customer_email)
+    products_type, products_preview = _preview_products(payload.get("products") if isinstance(payload, dict) else None)
+    paid_detected, detected_status = _detect_paid(payload if isinstance(payload, dict) else {})
+    payload_order_id = _to_str(
+        payload.get("order_id") or payload.get("orderid") or payload.get("order") if isinstance(payload, dict) else None
+    )
+    internal_order_id_guess = payload_order_num or payload_customer_extra or payload_order_id
+
+    log.debug(
+        "prodamus_webhook_products_debug products_type=%s products_preview=%s",
+        products_type,
+        products_preview,
+    )
+
+    log.info(
+        "prodamus_webhook_received method=%s payload_keys=%s query_internal_order_id=%s query_telegram_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s payload_customer_email=%s internal_order_id_from_email=%s internal_order_id_guess=%s detected_status=%s paid=%s sign_present=%s",
+        request.method,
+        ",".join(payload_keys),
+        query_internal_order_id,
+        query_telegram_id,
+        payload_order_id,
+        payload_order_num,
+        payload_customer_extra,
+        payload_customer_email,
+        internal_order_id_from_email,
+        internal_order_id_guess,
+        detected_status,
+        paid_detected,
+        bool(sign),
+    )
+
+    signature_valid = verify_signature(payload, settings.prodamus_secret_key, sign)
+    log.info(
+        "prodamus_webhook_signature_checked query_internal_order_id=%s query_telegram_id=%s internal_order_id_guess=%s signature_valid=%s",
+        query_internal_order_id,
+        query_telegram_id,
+        internal_order_id_guess,
+        signature_valid,
+    )
+    if not signature_valid:
+        log.warning("prodamus_signature_invalid ip=%s", request.client.host if request.client else None)
+        raise HTTPException(status_code=400, detail="invalid signature")
+
+    if paid_detected is not True:
+        log.info(
+            "prodamus_webhook_not_paid query_internal_order_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s payload_customer_email=%s internal_order_id_from_email=%s detected_status=%s paid=%s",
+            query_internal_order_id,
+            payload_order_id,
+            payload_order_num,
+            payload_customer_extra,
+            payload_customer_email,
+            internal_order_id_from_email,
+            detected_status,
+            paid_detected,
+        )
+        return {"ok": True}
+
+    normalized_customer_email = payload_customer_email.strip().lower()
+    webhook = extract_webhook(payload)
+    internal_order_id = (
+        query_internal_order_id
+        or internal_order_id_from_email
+        or payload_order_num
+        or payload_customer_extra
+        or webhook.order_id
+    )
+
+    payment_telegram_id: int | None = None
+    telegram_id_from_db: int | None = None
+    already_paid = False
+    payment_found = False
+
+    async with sessionmaker() as session:
+        async with session.begin():
+            payment = None
+            if normalized_customer_email:
+                payment = (
+                    await session.execute(
+                        select(Payment)
+                        .where(
+                            Payment.buyer_email == normalized_customer_email,
+                            Payment.status.in_([PaymentStatus.created, PaymentStatus.pending]),
+                        )
+                        .order_by(Payment.created_at.desc())
+                        .limit(1)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+
+                if payment is None:
+                    payment = (
+                        await session.execute(
+                            select(Payment)
+                            .where(Payment.buyer_email == normalized_customer_email)
+                            .order_by(Payment.created_at.desc())
+                            .limit(1)
+                            .with_for_update()
+                        )
+                    ).scalar_one_or_none()
+
+                if payment is None:
+                    recent = (
+                        await session.execute(
+                            select(Payment.buyer_email, Payment.order_id)
+                            .where(Payment.status.in_([PaymentStatus.created, PaymentStatus.pending]))
+                            .order_by(Payment.created_at.desc())
+                            .limit(5)
+                        )
+                    ).all()
+                    recent_pairs = [f"{(r[0] or '')}:{r[1]}" for r in recent]
+                    log.warning(
+                        "prodamus_payment_not_found_by_email customer_email=%s recent_unpaid=%s",
+                        normalized_customer_email,
+                        ",".join(recent_pairs),
+                    )
+
+            if payment is None:
+                payment = (
+                    await session.execute(
+                        select(Payment).where(Payment.order_id == internal_order_id).with_for_update()
+                    )
+                ).scalar_one_or_none()
+            if payment is None:
+                recent = (
+                    await session.execute(
+                        select(Payment.order_id).order_by(Payment.created_at.desc()).limit(5)
+                    )
+                ).scalars().all()
+                log.warning(
+                    "prodamus_payment_not_found query_internal_order_id=%s query_telegram_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s payload_customer_email=%s internal_order_id_from_email=%s internal_order_id=%s recent_order_ids=%s",
+                    query_internal_order_id,
+                    query_telegram_id,
+                    payload_order_id,
+                    payload_order_num,
+                    payload_customer_extra,
+                    payload_customer_email,
+                    internal_order_id_from_email,
+                    internal_order_id,
+                    ",".join(recent),
+                )
+                raise HTTPException(status_code=400, detail="unknown order_id")
+            payment_found = True
+            internal_order_id = payment.order_id
+
+            payment.raw_payload = webhook.raw
+            if webhook.prodamus_payment_id:
+                payment.prodamus_payment_id = webhook.prodamus_payment_id
+
+            payment_telegram_id = payment.telegram_id
+            telegram_id_from_db = payment.telegram_id
+
+            if webhook.currency and payment.currency and webhook.currency.lower() != payment.currency.lower():
+                log.warning(
+                    "prodamus_currency_mismatch internal_order_id=%s expected=%s got=%s",
+                    internal_order_id,
+                    payment.currency,
+                    webhook.currency,
+                )
+                raise HTTPException(status_code=400, detail="currency mismatch")
+
+            if payment.status == PaymentStatus.paid:
+                already_paid = True
+            else:
+                payment.status = PaymentStatus.paid
+                payment.paid_at = utcnow()
+                await ensure_subscription_paid(
+                    session,
+                    payment.telegram_id,
+                    settings.access_days,
+                    settings.lifetime_access,
+                )
+
+    if payment_telegram_id is None:
+        raise HTTPException(status_code=500, detail="internal error")
+
+    log.info(
+        "prodamus_webhook_payment_loaded internal_order_id=%s query_internal_order_id=%s query_telegram_id=%s payload_order_id=%s payload_order_num=%s payload_customer_extra=%s signature_valid=%s payment_found=%s telegram_id_from_db=%s already_paid=%s",
+        internal_order_id,
+        query_internal_order_id,
+        query_telegram_id,
+        payload_order_id,
+        payload_order_num,
+        payload_customer_extra,
+        signature_valid,
+        payment_found,
+        telegram_id_from_db,
+        already_paid,
+    )
+
+    # КРИТИЧНО: Prodamus ждёт ответ ограниченное время (обычно ~5 секунд).
+    # Всё, что может тормозить (Telegram API), переносим в фон и отвечаем сразу.
+    asyncio.create_task(
+        _send_invite_message_background(
+            sessionmaker=sessionmaker,
+            bot=bot,
+            settings=settings,
+            internal_order_id=internal_order_id,
+            telegram_id=payment_telegram_id,
+        )
+    )
+
+    log.info(
+        "prodamus_webhook_acked internal_order_id=%s telegram_id=%s duration_ms=%s",
+        internal_order_id,
+        payment_telegram_id,
+        int((perf_counter() - started) * 1000),
+    )
+    return {"ok": True}
