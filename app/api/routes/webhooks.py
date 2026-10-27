@@ -241,6 +241,29 @@ async def _send_invite_message_background(
         )
 
 
+async def _notify_admins_unmatched(
+    *,
+    bot: object,
+    settings: Settings,
+    email: str,
+    amount: str,
+    prodamus_order_id: str,
+) -> None:
+    """Оплата пришла, но заказ в базе не найден: сообщаем админам, чтобы выдать доступ вручную."""
+    text = (
+        "Пришла оплата, но заказ в боте не найден.\n"
+        f"Email: {email or '-'}\n"
+        f"Сумма: {amount or '-'}\n"
+        f"Заказ Prodamus: {prodamus_order_id or '-'}\n\n"
+        "Найдите пользователя и выдайте доступ: /admin_grant <telegram_id>"
+    )
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            log.exception("unmatched_payment_notify_failed admin_id=%s", admin_id)
+
+
 @router.get("/webhooks/prodamus")
 async def prodamus_webhook_alive() -> dict:
     return {
@@ -405,6 +428,17 @@ async def prodamus_webhook(request: Request) -> dict:
                     internal_order_id,
                     ",".join(recent),
                 )
+                unmatched_attempt = _to_str(payload.get("attempt")).strip()
+                if unmatched_attempt in {"", "1"}:
+                    asyncio.create_task(
+                        _notify_admins_unmatched(
+                            bot=bot,
+                            settings=settings,
+                            email=payload_customer_email,
+                            amount=_to_str(payload.get("sum")),
+                            prodamus_order_id=payload_order_id,
+                        )
+                    )
                 raise HTTPException(status_code=400, detail="unknown order_id")
             payment_found = True
             internal_order_id = payment.order_id

@@ -246,6 +246,61 @@ async def admin_revoke(message: Message, bot: Bot, session: AsyncSession, settin
     log.info("admin_revoke telegram_id=%s", telegram_id)
 
 
+@router.message(Command("admin_grant"))
+async def admin_grant(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
+    """Ручная выдача доступа, если вебхук Prodamus не пришёл: помечает последний платёж оплаченным и шлёт ссылку."""
+    if not _is_admin(message, settings):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await message.answer("Использование: /admin_grant <telegram_id>")
+        return
+    telegram_id = int(parts[1])
+
+    payment = (
+        await session.execute(
+            select(Payment)
+            .where(Payment.telegram_id == telegram_id)
+            .order_by(Payment.created_at.desc())
+            .limit(1)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if payment is None:
+        await message.answer("У этого пользователя нет платежей в боте.")
+        return
+
+    if payment.status != PaymentStatus.paid:
+        payment.status = PaymentStatus.paid
+        payment.paid_at = utcnow()
+        await ensure_subscription_paid(session, telegram_id, settings.access_days, settings.lifetime_access)
+
+    expire_at = utcnow() + timedelta(minutes=settings.invite_link_expire_minutes)
+    invite = await create_one_time_invite(bot, settings.group_id, expire_at)
+    session.add(
+        InviteLink(
+            telegram_id=telegram_id,
+            invite_link=invite.invite_link,
+            expire_at=expire_at,
+            used=False,
+        )
+    )
+    payment.invite_sent_at = utcnow()
+    await session.flush()
+
+    await bot.send_message(
+        telegram_id,
+        "Оплата подтверждена ✅\n\n"
+        "Вот ссылка для входа в закрытый канал:\n"
+        f"{invite.invite_link}\n\n"
+        "Ссылка действует 3 минуты.",
+        disable_web_page_preview=True,
+    )
+    await message.answer(f"Ок, доступ выдан, ссылку отправил (заказ {payment.order_id}).")
+    log.info("admin_grant telegram_id=%s order_id=%s", telegram_id, payment.order_id)
+
+
 @router.message(Command("admin_send_invite"))
 async def admin_send_invite(message: Message, bot: Bot, session: AsyncSession, settings: Settings) -> None:
     if not _is_admin(message, settings):
